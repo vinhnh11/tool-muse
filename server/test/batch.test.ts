@@ -205,3 +205,55 @@ test("11. Tạo V2 (sửa prompt) vẫn giữ nguyên V1", async () => {
   const gv = env.ctx.db.all<{ version: number }>("SELECT version FROM generation_versions WHERE lineage_id = ? ORDER BY version", v1.lineageId);
   assert.deepEqual(gv.map((x) => x.version), [1, 2]);
 });
+
+test("Hủy mọi job của batch CHỜ DUYỆT → batch thành 'cancelled'; duyệt batch không còn job chờ bị từ chối; batch kẹt tự phục hồi", async () => {
+  const env = await createEnv("cancel-awaiting");
+  envs.push(env);
+  const c = await userClient(env, "gina");
+  const prov = mockProviderId(env, c.workspaceId);
+  const r = await c.post("/api/batches", { mode: "list", providerConfigId: prov, modelId: "mock-standard", config: { durationSec: 4 }, prompts: [{ prompt: "Chờ duyệt một" }, { prompt: "Chờ duyệt hai" }] });
+  const id = r.body.batch.id;
+  const cp = await c.post(`/api/batches/${id}/cancel-pending`);
+  assert.equal(cp.body.cancelled, 2);
+  const b = (await c.get(`/api/batches/${id}`)).body;
+  assert.equal(b.status, "cancelled");
+  const appr = await c.post(`/api/batches/${id}/approve`, { confirm: true });
+  assert.equal(appr.status, 409);
+  assert.equal((await c.get(`/api/batches/${id}`)).body.status, "cancelled");
+
+  // Batch còn job nhưng một job bị hủy lẻ → vẫn chờ duyệt; duyệt khi 0 job chờ (ép trạng thái) → NOTHING_TO_APPROVE
+  const r2 = await c.post("/api/batches", { mode: "list", providerConfigId: prov, modelId: "mock-standard", config: { durationSec: 4 }, prompts: [{ prompt: "Giữ" }, { prompt: "Hủy lẻ" }] });
+  const jobs2 = (await c.get(`/api/jobs?batchId=${r2.body.batch.id}`)).body.jobs;
+  await c.post(`/api/jobs/${jobs2.find((j: any) => j.prompt === "Hủy lẻ").id}/cancel`);
+  assert.equal((await c.get(`/api/batches/${r2.body.batch.id}`)).body.status, "awaiting_approval");
+  env.ctx.db.run("UPDATE video_batch_jobs SET status = 'cancelled' WHERE batch_id = ?", r2.body.batch.id);
+  const a2 = await c.post(`/api/batches/${r2.body.batch.id}/approve`, { confirm: true });
+  assert.equal(a2.status, 409);
+  assert.equal(a2.body.error.code, "NOTHING_TO_APPROVE");
+
+  // Batch "running" mà không còn job nào chưa xong (dữ liệu cũ bị kẹt) → worker tự chuyển trạng thái đúng
+  env.ctx.db.run("UPDATE video_batches SET status = 'running' WHERE id = ?", id);
+  env.startWorker();
+  await waitFor(async () => (await c.get(`/api/batches/${id}`)).body.status, (s) => s === "cancelled", 5000);
+});
+
+test("Lịch sử sự kiện (REST) cùng định dạng với SSE: {id,type,batchId,jobId,from,to,message,data,at}", async () => {
+  const env = await createEnv("events-shape");
+  envs.push(env);
+  const c = await userClient(env, "hank");
+  const prov = mockProviderId(env, c.workspaceId);
+  tuneMock(env, prov, { latencyMs: 80, maxConcurrency: 2, rpm: 1000 });
+  env.startWorker();
+  const b = await createAndApprove(c, prov, ["Sự kiện"]);
+  await waitBatchDone(c, b);
+  const job = (await c.get(`/api/jobs?batchId=${b}`)).body.jobs[0];
+  for (const p of [`/api/jobs/${job.id}/events`, `/api/batches/${b}/events`]) {
+    const ev = (await c.get(p)).body.events;
+    assert.ok(ev.length > 0);
+    for (const e of ev) {
+      assert.deepEqual(Object.keys(e).sort(), ["at", "batchId", "data", "from", "id", "jobId", "message", "to", "type"]);
+      assert.equal(e.batchId, b);
+    }
+    assert.ok(ev.some((e: any) => e.type === "job.status" && e.to === "completed"));
+  }
+});

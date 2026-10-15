@@ -38,6 +38,32 @@ export function recordEvent(db: Db, e: EventInput): void {
   wake.emit("event", e.workspaceId);
 }
 
+/** Một dòng job_events như lưu trong DB */
+export interface EventRow {
+  id: number;
+  type: string;
+  batch_id: string | null;
+  job_id: string | null;
+  from_status: string | null;
+  to_status: string | null;
+  message: string | null;
+  data_json: string | null;
+  created_at: string;
+}
+
+/** Định dạng công khai DUY NHẤT cho sự kiện - dùng chung cho SSE và REST lịch sử */
+export function eventToPublic(r: EventRow) {
+  let data: unknown = null;
+  if (r.data_json) {
+    try {
+      data = JSON.parse(r.data_json);
+    } catch {
+      data = null;
+    }
+  }
+  return { id: r.id, type: r.type, batchId: r.batch_id, jobId: r.job_id, from: r.from_status, to: r.to_status, message: r.message, data, at: r.created_at };
+}
+
 export interface AuditInput {
   workspaceId?: string | null;
   userId?: string | null;

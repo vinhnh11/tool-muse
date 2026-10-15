@@ -92,11 +92,11 @@ BatchConfig: `{ mode:"text-to-video"|"image-to-video"|"reference-to-video", dura
 
 - POST /api/batches/estimate `{ providerConfigId, modelId, config, prompts:PromptInput[], maxConcurrency, budgetLimit?, blankLines?, lines? }` → `{ check: BatchCheck, estimate: BatchEstimate }`
 - POST /api/batches `{ name?, sessionId?, mode:"single"|"list"|"file"|"ai", promptSetId?, providerConfigId, modelId, config, prompts, maxConcurrency, budgetLimit?, blankLines?, lines? }` → `{ batch: Batch, check, estimate }` - batch ở trạng thái `awaiting_approval` (CHƯA chạy). 422 BATCH_INVALID nếu có lỗi (details = BatchCheck). 409 BUDGET_EXCEEDED.
-- POST /api/batches/:id/approve `{ confirm:true, approvedMaxCost?:number, acknowledgeUnknownCost?:boolean }` → Batch (status running). Lỗi 409: COST_CONFIRMATION_MISMATCH / COST_UNKNOWN_ACK_REQUIRED / BUDGET_EXCEEDED / BUDGET_UNVERIFIABLE.
+- POST /api/batches/:id/approve `{ confirm:true, approvedMaxCost?:number, acknowledgeUnknownCost?:boolean }` → Batch (status running). Lỗi 409: COST_CONFIRMATION_MISMATCH / COST_UNKNOWN_ACK_REQUIRED / BUDGET_EXCEEDED / BUDGET_UNVERIFIABLE / NOTHING_TO_APPROVE (không còn job chờ duyệt - batch tự chuyển "cancelled"/"completed").
   UI: dialog hiện số video, chi phí ước tính (hoặc "không xác định" + checkbox chấp nhận), ngân sách, số luồng thực tế; nút xác nhận gửi approvedMaxCost = estimate.total.
 - GET /api/batches?sessionId= → `{ batches: Batch[] }` ; GET /api/batches/:id
 - POST /api/batches/:id/pause | /resume | /cancel-pending (→ `{cancelled}`) | /retry-failed `{confirm:true, approvedMaxCost?, acknowledgeUnknownCost?}` (→ `{retried, estimate, skipped}`; 409 CONFIRMATION_REQUIRED có details.estimate khi chưa confirm)
-- GET /api/batches/:id/events → `{ events }`
+- GET /api/batches/:id/events → `{ events: Event[] }` (mới nhất trước; cùng định dạng với SSE)
 - GET /api/batches/:id/export?format=zip|csv|json|txt (tải file)
 
 Batch: `{ id, sessionId, name, mode, promptSetId, providerConfigId, providerName, providerType, modelId, config, maxConcurrency, status:"awaiting_approval"|"running"|"paused"|"completed"|"cancelled", budgetLimit, estimate, estimatedCost, actualCost, committedCost, currency, approvedAt, counts:{[status]:number}, total, progress, createdAt, updatedAt }`
@@ -119,5 +119,5 @@ Job: `{ id, batchId, sessionId, seq, title, prompt, negative, referenceAssetIds,
 - GET /api/library?libraryOnly=1 → `{ items: (Asset & { batchId, batchName, sessionTitle, version, prompt })[] }`
 
 ## Sự kiện realtime (SSE)
-- GET /api/events (EventSource, cookie) - event types: `job.status`, `job.progress`, `job.created`, `batch.created`, `batch.approved`, `batch.paused`, `batch.resumed`, `batch.status`, `analysis.status`, `analysis.progress`, `prompts.progress`, ... data: `{ id, type, batchId, jobId, from, to, message, data, at }`.
+- GET /api/events (EventSource, cookie) - event types: `job.status`, `job.progress`, `job.created`, `batch.created`, `batch.approved`, `batch.paused`, `batch.resumed`, `batch.status`, `analysis.status`, `analysis.progress`, `prompts.progress`, ... data (Event): `{ id, type, batchId, jobId, from, to, message, data, at }` - đúng định dạng của GET /api/jobs/:id/events và /api/batches/:id/events.
   Dùng để làm mới dữ liệu (refetch job/batch liên quan, debounce ~300ms). Video job nào xong là xem được ngay.

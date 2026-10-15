@@ -5,7 +5,7 @@ import Busboy from "busboy";
 import { ROOT_DIR } from "./config.ts";
 import type { AppContext } from "./context.ts";
 import * as auth from "./auth.ts";
-import { audit, wake } from "./events.ts";
+import { audit, eventToPublic, wake, type EventRow } from "./events.ts";
 import { AnalysisService } from "./analysis.ts";
 import { BatchService, type Actor, type BatchConfig, type BatchPromptInput } from "./batches.ts";
 import { ChatService } from "./chat.ts";
@@ -581,14 +581,10 @@ export function createApp(ctx: AppContext): express.Express {
       if (busy) return;
       busy = true;
       try {
-        const rows = ctx.db.all<{ id: number; type: string; batch_id: string | null; job_id: string | null; from_status: string | null; to_status: string | null; message: string | null; data_json: string | null; created_at: string }>(
-          "SELECT * FROM job_events WHERE workspace_id = ? AND id > ? ORDER BY id LIMIT 500",
-          workspaceId,
-          last,
-        );
+        const rows = ctx.db.all<EventRow>("SELECT * FROM job_events WHERE workspace_id = ? AND id > ? ORDER BY id LIMIT 500", workspaceId, last);
         for (const r of rows) {
           last = r.id;
-          res.write(`id: ${r.id}\nevent: ${r.type}\ndata: ${JSON.stringify({ id: r.id, type: r.type, batchId: r.batch_id, jobId: r.job_id, from: r.from_status, to: r.to_status, message: r.message, data: r.data_json ? JSON.parse(r.data_json) : null, at: r.created_at })}\n\n`);
+          res.write(`id: ${r.id}\nevent: ${r.type}\ndata: ${JSON.stringify(eventToPublic(r))}\n\n`);
         }
       } finally {
         busy = false;

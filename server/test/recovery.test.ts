@@ -36,7 +36,7 @@ test("5. Lỗi tạm thời được thử lại có backoff; lỗi vĩnh viễn
   assert.equal(policy.error.code, "CONTENT_POLICY");
   assert.equal(normal.attempt, 1);
   const ev = (await c.get(`/api/jobs/${submitRetry.id}/events`)).body.events;
-  assert.ok(ev.some((e: any) => e.to_status === "queued" && /Thử lại sau/.test(e.message ?? "")), "có sự kiện xếp lại kèm backoff");
+  assert.ok(ev.some((e: any) => e.to === "queued" && /Thử lại sau/.test(e.message ?? "")), "có sự kiện xếp lại kèm backoff");
 
   // Provider lỗi tạm thời mãi → dừng ở max_attempts (3), không lặp vô hạn
   tuneMock(env, prov, { latencyMs: 50, maxConcurrency: 4, failRate: 1, rpm: 1000 });

@@ -93,6 +93,7 @@ export class Scheduler {
     this.running = true;
     try {
       this.reclaimExpiredLeases();
+      this.settleIdleBatches();
       const submits = this.claimForSubmit().map((c) => this.track(this.submit(c.job, c.provider)));
       const polls = this.claimForPoll().map((c) => this.track(this.poll(c.job, c.provider)));
       await Promise.allSettled([...submits, ...polls]);
@@ -147,6 +148,17 @@ export class Scheduler {
   }
 
   // ---------------------------------------------------------------- thu hồi lease
+
+  /** Batch đang mở nhưng không còn job nào chưa xong (vd. dữ liệu cũ, hủy lẻ) → khép trạng thái đúng */
+  settleIdleBatches(): void {
+    const idle = this.ctx.db.all<{ id: string }>(
+      `SELECT b.id FROM video_batches b WHERE b.status IN ('running','paused','awaiting_approval')
+         AND EXISTS (SELECT 1 FROM video_batch_jobs j WHERE j.batch_id = b.id)
+         AND NOT EXISTS (SELECT 1 FROM video_batch_jobs j WHERE j.batch_id = b.id AND j.status NOT IN ('completed','failed','cancelled'))
+       LIMIT 50`,
+    );
+    for (const b of idle) this.svc.refreshBatch(b.id);
+  }
 
   reclaimExpiredLeases(): void {
     const now = Date.now();

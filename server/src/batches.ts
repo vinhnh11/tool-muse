@@ -1,5 +1,5 @@
 import type { AppContext } from "./context.ts";
-import { audit, recordEvent } from "./events.ts";
+import { audit, eventToPublic, recordEvent, type EventRow } from "./events.ts";
 import type { CostEstimate, GenerationInput, GenerationMode, ValidationIssue } from "./providers/types.ts";
 import { checkList, type ParsedLine, type PromptDraft } from "./prompts.ts";
 import { AppError, newId, nowIso, safeJsonParse } from "./util.ts";
@@ -391,6 +391,11 @@ export class BatchService {
     const b = this.getBatchRow(workspaceId, batchId);
     if (b.status !== "awaiting_approval") throw new AppError("BATCH_NOT_AWAITING_APPROVAL", `Batch đang ở trạng thái "${b.status}", không cần duyệt.`, 409);
     if (opts.confirm !== true) throw new AppError("CONFIRMATION_REQUIRED", "Cần xác nhận rõ ràng (confirm=true) trước khi chạy batch.", 409);
+    const waiting = Number(this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM video_batch_jobs WHERE batch_id = ? AND status = 'awaiting_approval'", batchId)?.n ?? 0);
+    if (waiting === 0) {
+      this.refreshBatch(batchId);
+      throw new AppError("NOTHING_TO_APPROVE", "Batch không còn job nào chờ duyệt (đã hủy hết).", 409);
+    }
     const est = this.reestimate(b);
     if (b.budget_limit !== null) {
       if (est.total === null && !opts.acknowledgeUnknownCost)
@@ -705,7 +710,8 @@ export class BatchService {
     const actual = this.db.get<{ c: number | null; n: number }>("SELECT SUM(actual_cost) AS c, COUNT(actual_cost) AS n FROM video_batch_jobs WHERE batch_id = ?", batchId);
     const actualCost = actual && Number(actual.n) > 0 ? round4(Number(actual.c ?? 0)) : null;
     let status = b.status;
-    if ((b.status === "running" || b.status === "paused") && total > 0 && terminal === total) {
+    // Batch chờ duyệt mà mọi job đã bị hủy cũng phải khép lại (không để "chờ duyệt" với 0 job)
+    if ((b.status === "running" || b.status === "paused" || b.status === "awaiting_approval") && total > 0 && terminal === total) {
       const cancelledAll = counts.every((c) => c.status === "cancelled");
       status = cancelledAll ? "cancelled" : "completed";
     }
@@ -860,6 +866,7 @@ export class BatchService {
       where.push("id > ?");
       params.push(opts.afterId);
     }
-    return this.db.all(`SELECT * FROM job_events WHERE ${where.join(" AND ")} ORDER BY id DESC LIMIT ?`, ...params, opts.limit ?? 200);
+    const rows = this.db.all<EventRow>(`SELECT * FROM job_events WHERE ${where.join(" AND ")} ORDER BY id DESC LIMIT ?`, ...params, opts.limit ?? 200);
+    return rows.map(eventToPublic);
   }
 }
