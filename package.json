@@ -1,0 +1,43 @@
+{
+  "name": "batch-video-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI Batch Video Generation Studio - phân tích video tham khảo, sinh prompt hàng loạt, chạy batch qua video provider với hàng đợi bền vững",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "start": "node server/src/main.ts",
+    "worker": "node server/src/workerMain.ts",
+    "build": "vite build --config web/vite.config.ts",
+    "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",
+    "test": "node --test --test-concurrency=1 \"server/test/**/*.test.ts\"",
+    "test:e2e": "node --test --test-concurrency=1 \"server/test/e2e/**/*.test.ts\"",
+    "cli": "node server/src/cli.ts",
+    "mcp": "node server/src/mcp.ts",
+    "user:create": "node server/src/cli.ts user create"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "archiver": "^7.0.1",
+    "busboy": "^1.6.0",
+    "express": "^5.1.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/archiver": "^6.0.3",
+    "@types/busboy": "^1.5.4",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "lucide-react": "^0.540.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.1.0"
+  }
+}

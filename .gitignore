@@ -1,0 +1,10 @@
+node_modules/
+data/
+storage/
+web/dist/
+.env
+*.log
+.test-tmp/
+
+.dev-data/
+.dev-storage/
