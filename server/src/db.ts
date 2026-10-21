@@ -374,6 +374,33 @@ CREATE TABLE mock_remote_tasks (
 CREATE UNIQUE INDEX uq_mock_idem ON mock_remote_tasks(provider_config_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 `,
   },
+  {
+    version: 2,
+    sql: `
+-- Hàng đợi tự đăng Reels lên Facebook Page
+CREATE TABLE fb_reel_posts (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  asset_id TEXT NOT NULL UNIQUE REFERENCES video_assets(id) ON DELETE CASCADE,
+  job_id TEXT,
+  status TEXT NOT NULL,               -- pending_review | approved | publishing | published | failed | skipped | rejected
+  caption TEXT,
+  skip_reason TEXT,
+  error_message TEXT,                 -- đã che token
+  fb_video_id TEXT,
+  fb_post_id TEXT,
+  step TEXT,                          -- started | uploaded | finishing | finished
+  attempts INTEGER NOT NULL DEFAULT 0,
+  approved_by TEXT,
+  approved_at TEXT,
+  publishing_at TEXT,
+  published_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_fbr_status ON fb_reel_posts(workspace_id, status, created_at);
+`,
+  },
 ];
 
 function migrate(db: Db): void {

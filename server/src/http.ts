@@ -21,6 +21,9 @@ import { mimeOf } from "./storage.ts";
 import { invokeTool, TOOLS, toJsonSchema } from "./tools.ts";
 import { nudgeJob } from "./scheduler.ts";
 import { AppError, redact, timingSafeEqualStr } from "./util.ts";
+import { getPageToken, getReelsConfig, saveReelsConfig } from "./fbreels/config.ts";
+import { GraphReelsClient } from "./fbreels/graph.ts";
+import { approve as reelApprove, listQueue, reject as reelReject, remove as reelRemove, retry as reelRetry } from "./fbreels/queue.ts";
 
 const COOKIE = "bvs_session";
 
@@ -193,6 +196,69 @@ export function createApp(ctx: AppContext): express.Express {
   app.get(
     "/api/settings/system",
     h(() => ({ workerMode: ctx.cfg.workerMode, editInboxConfigured: Boolean(ctx.cfg.editInboxDir), webhookBaseConfigured: Boolean(ctx.cfg.publicBaseUrl) })),
+  );
+
+  // ------------------------------------------------------------ Facebook Reels (tự đăng)
+
+  const uid = (req: AuthedRequest): string => req.principal!.user.id;
+  const fbAudit = (req: AuthedRequest, action: string, targetId?: string, data?: unknown): void =>
+    audit(ctx.db, { workspaceId: ws(req), userId: uid(req), actor: actorOf(req).kind, action, targetType: "fb_reel", targetId, data });
+  app.get("/api/facebook/reels/config", h((req) => getReelsConfig(ctx, ws(req))));
+  app.put(
+    "/api/facebook/reels/config",
+    h((req) => {
+      const b = req.body ?? {};
+      const out = saveReelsConfig(ctx, ws(req), b);
+      fbAudit(req, "fb.reel.config", undefined, { pageId: out.pageId, graphVersion: out.graphVersion, intervalMin: out.intervalMin, autoEnabled: out.autoEnabled, requireApproval: out.requireApproval, tokenChanged: b.pageToken !== undefined });
+      return out;
+    }),
+  );
+  app.post(
+    "/api/facebook/reels/config/test",
+    h(async (req) => {
+      const cfg = getReelsConfig(ctx, ws(req));
+      if (!cfg.pageId || !cfg.tokenConfigured) throw new AppError("FB_NOT_CONFIGURED", "Chưa nhập Page ID và Page access token.", 409);
+      const token = getPageToken(ctx, ws(req));
+      try {
+        const info = await new GraphReelsClient({ fetchImpl: ctx.fetchImpl, pageId: cfg.pageId, version: cfg.graphVersion, token }).pageInfo();
+        return { ok: true, pageName: info.name, message: `Kết nối được Page "${info.name}".` };
+      } catch (e) {
+        return { ok: false, message: redact((e as Error).message, [token]) };
+      }
+    }),
+  );
+  app.get("/api/facebook/reels/queue", h((req) => listQueue(ctx, ws(req), req.query.status ? String(req.query.status) : undefined)));
+  app.post(
+    "/api/facebook/reels/queue/:id/approve",
+    h((req) => {
+      const item = reelApprove(ctx, ws(req), String(req.params.id), uid(req));
+      fbAudit(req, "fb.reel.approve", item.id);
+      return item;
+    }),
+  );
+  app.post(
+    "/api/facebook/reels/queue/:id/reject",
+    h((req) => {
+      reelReject(ctx, ws(req), String(req.params.id));
+      fbAudit(req, "fb.reel.reject", String(req.params.id));
+      return { ok: true };
+    }),
+  );
+  app.post(
+    "/api/facebook/reels/queue/:id/retry",
+    h((req) => {
+      reelRetry(ctx, ws(req), String(req.params.id), uid(req));
+      fbAudit(req, "fb.reel.retry", String(req.params.id));
+      return { ok: true };
+    }),
+  );
+  app.delete(
+    "/api/facebook/reels/queue/:id",
+    h((req) => {
+      reelRemove(ctx, ws(req), String(req.params.id));
+      fbAudit(req, "fb.reel.remove", String(req.params.id));
+      return { ok: true };
+    }),
   );
 
   // ------------------------------------------------------------ provider

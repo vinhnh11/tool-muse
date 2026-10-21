@@ -7,6 +7,7 @@ import { recordEvent } from "./events.ts";
 import { ERROR_MESSAGES, ProviderError, type ErrorCategory, type ProviderCallContext, type ResolvedProviderConfig, type VideoProvider } from "./providers/types.ts";
 import type { ProviderConfigRow } from "./providers/registry.ts";
 import { newId, nowIso, redact, safeJsonParse } from "./util.ts";
+import { enqueueReel } from "./fbreels/queue.ts";
 
 /**
  * BATCH SCHEDULER - hàng đợi bền trên SQLite.
@@ -500,6 +501,11 @@ export class Scheduler {
         this.svc.refreshBatch(job.batch_id);
       }
     });
+    try {
+      enqueueReel(this.ctx, asset!.id);
+    } catch (e) {
+      console.warn(`[fbreels] Không xếp được video vào hàng đăng: ${(e as Error).message}`);
+    }
     void interval;
   }
 
