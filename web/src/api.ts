@@ -602,6 +602,45 @@ function qs(params: Record<string, string | number | boolean | null | undefined>
   return s ? `?${s}` : "";
 }
 
+export interface FbReelsConfig {
+  pageId: string;
+  graphVersion: string;
+  intervalMin: number;
+  autoEnabled: boolean;
+  requireApproval: boolean;
+  captionTemplate: string;
+  hashtags: string;
+  aiCaption: boolean;
+  enabledSince: string | null;
+  tokenConfigured: boolean;
+  tokenLast4: string | null;
+  updatedAt: string | null;
+}
+
+export type FbReelStatus = "pending_review" | "approved" | "publishing" | "published" | "failed" | "skipped" | "rejected";
+
+export interface FbReelItem {
+  id: string;
+  assetId: string;
+  status: FbReelStatus;
+  statusLabel: string;
+  title: string;
+  prompt: string;
+  fileName: string;
+  durationSec: number | null;
+  width: number | null;
+  height: number | null;
+  thumbnailUrl: string | null;
+  skipReason: string | null;
+  errorMessage: string | null;
+  caption: string | null;
+  fbVideoId: string | null;
+  attempts: number;
+  approvedAt: string | null;
+  publishedAt: string | null;
+  createdAt: string;
+}
+
 const enc = encodeURIComponent;
 
 export const api = {
@@ -616,6 +655,14 @@ export const api = {
   tokens: () => get<{ tokens: ApiToken[] }>("/api/tokens"),
   createToken: (name: string) => post<{ id: string; token: string; note: string }>("/api/tokens", { name }),
   revokeToken: (id: string) => del<{ ok: boolean }>(`/api/tokens/${enc(id)}`),
+  fbReelsConfig: () => get<FbReelsConfig>("/api/facebook/reels/config"),
+  saveFbReelsConfig: (body: Partial<Omit<FbReelsConfig, "tokenConfigured" | "tokenLast4" | "updatedAt" | "enabledSince">> & { pageToken?: string | null }) => put<FbReelsConfig>("/api/facebook/reels/config", body),
+  testFbReels: () => post<{ ok: boolean; pageName?: string; message: string }>("/api/facebook/reels/config/test"),
+  fbReelsQueue: () => get<{ items: FbReelItem[] }>("/api/facebook/reels/queue"),
+  fbReelsApprove: (id: string) => post<FbReelItem>(`/api/facebook/reels/queue/${enc(id)}/approve`),
+  fbReelsReject: (id: string) => post<{ ok: boolean }>(`/api/facebook/reels/queue/${enc(id)}/reject`),
+  fbReelsRetry: (id: string) => post<{ ok: boolean }>(`/api/facebook/reels/queue/${enc(id)}/retry`),
+  fbReelsRemove: (id: string) => del<{ ok: boolean }>(`/api/facebook/reels/queue/${enc(id)}`),
   llmSettings: () => get<LlmSettings>("/api/settings/llm"),
   saveLlmSettings: (body: Partial<Omit<LlmSettings, "hasApiKey" | "updatedAt">> & { apiKey?: string | null }) => put<LlmSettings>("/api/settings/llm", body),
   systemInfo: () => get<SystemInfo>("/api/settings/system"),

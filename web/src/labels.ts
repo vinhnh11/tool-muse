@@ -14,6 +14,16 @@ export const JOB_STATUS_META: Record<JobStatus, { label: string; tone: Tone }> =
   cancelled: { label: "Đã hủy", tone: "muted" },
 };
 
+export const FB_REEL_STATUS_META: Record<string, { label: string; tone: Tone }> = {
+  pending_review: { label: "Chờ duyệt", tone: "violet" },
+  approved: { label: "Đã duyệt, trong hàng đăng", tone: "info" },
+  publishing: { label: "Đang đăng", tone: "accent" },
+  published: { label: "Đã đăng", tone: "success" },
+  failed: { label: "Lỗi", tone: "danger" },
+  skipped: { label: "Bỏ qua", tone: "warning" },
+  rejected: { label: "Đã từ chối", tone: "muted" },
+};
+
 export const BATCH_STATUS_META: Record<BatchStatus, { label: string; tone: Tone }> = {
   draft: { label: "Nháp", tone: "muted" },
   awaiting_approval: { label: "Chờ duyệt", tone: "violet" },

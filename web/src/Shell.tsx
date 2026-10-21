@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Bot, Clapperboard, Library, LogOut, Menu, PanelRightClose, PanelRightOpen, Plug, Plus, Settings, X } from "lucide-react";
+import { Bot, Clapperboard, Library, LogOut, Menu, PanelRightClose, PanelRightOpen, Plug, Plus, Settings, Share2, X } from "lucide-react";
 import { ApprovalDialog } from "./components/ApprovalDialog";
 import { useDialogs } from "./components/ConfirmDialog";
 import { useToast } from "./components/Toast";
@@ -8,6 +8,7 @@ import { asApiError } from "./api";
 import { useLocalStorage } from "./hooks/useApi";
 import { useEventSource, type ConnectionState } from "./hooks/useEvents";
 import { BatchStudio } from "./pages/batch/BatchStudio";
+import { FacebookPage } from "./pages/FacebookPage";
 import { LibraryPage } from "./pages/LibraryPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -17,6 +18,7 @@ const NAV: { id: PageId; label: string; icon: ReactNode }[] = [
   { id: "batch", label: "Batch Studio", icon: <Clapperboard size={18} /> },
   { id: "library", label: "Thư viện", icon: <Library size={18} /> },
   { id: "providers", label: "Provider", icon: <Plug size={18} /> },
+  { id: "facebook", label: "Facebook", icon: <Share2 size={18} /> },
   { id: "settings", label: "Cài đặt", icon: <Settings size={18} /> },
 ];
 
@@ -189,6 +191,7 @@ export function Shell() {
           {page === "batch" ? <BatchStudio /> : null}
           {page === "library" ? <LibraryPage /> : null}
           {page === "providers" ? <ProvidersPage /> : null}
+          {page === "facebook" ? <FacebookPage /> : null}
           {page === "settings" ? <SettingsPage /> : null}
         </main>
       </div>
