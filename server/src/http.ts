@@ -21,7 +21,7 @@ import { mimeOf } from "./storage.ts";
 import { invokeTool, TOOLS, toJsonSchema } from "./tools.ts";
 import { nudgeJob } from "./scheduler.ts";
 import { AppError, redact, timingSafeEqualStr } from "./util.ts";
-import { getPageToken, getReelsConfig, saveReelsConfig } from "./fbreels/config.ts";
+import { clearReelsPause, getPageToken, getReelsConfig, saveReelsConfig } from "./fbreels/config.ts";
 import { GraphReelsClient } from "./fbreels/graph.ts";
 import { approve as reelApprove, listQueue, reject as reelReject, remove as reelRemove, retry as reelRetry } from "./fbreels/queue.ts";
 
@@ -225,6 +225,14 @@ export function createApp(ctx: AppContext): express.Express {
       } catch (e) {
         return { ok: false, message: redact((e as Error).message, [token]) };
       }
+    }),
+  );
+  app.post(
+    "/api/facebook/reels/resume",
+    h((req) => {
+      clearReelsPause(ctx, ws(req));
+      fbAudit(req, "fb.reel.resume");
+      return { ok: true };
     }),
   );
   app.get("/api/facebook/reels/queue", h((req) => listQueue(ctx, ws(req), req.query.status ? String(req.query.status) : undefined)));

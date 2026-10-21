@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import type { AppContext } from "../context.ts";
-import { nowIso, redact } from "../util.ts";
+import { nowIso, redact, sleep as realSleep } from "../util.ts";
 import { buildCaption } from "./caption.ts";
-import { configuredWorkspaces, getLastPublishAt, getPageToken, getReelsConfig, setLastPublishAt, type ReelsConfig } from "./config.ts";
-import { GraphError, GraphReelsClient } from "./graph.ts";
+import { configuredWorkspaces, getLastPublishAt, getPageToken, getReelsConfig, getReelsPause, setLastPublishAt, setReelsPause, type ReelsConfig } from "./config.ts";
+import { GraphError, GraphReelsClient, isAuthKind, isTransientKind } from "./graph.ts";
 import { sweepMissing, type ReelPostRow } from "./queue.ts";
 
 export interface PublisherOptions {
@@ -16,11 +16,16 @@ export interface PublisherOptions {
   pollMaxMs?: number;
 }
 
+/** Dòng 'publishing' mới hơn ngưỡng này coi như tiến trình khác đang đăng thật, recover() không đụng tới */
+export const STALE_PUBLISHING_MS = 15 * 60_000;
+/** Thử lại lỗi tạm thời ở bước start/upload: tối đa 3 lần, giãn cách tăng dần */
+export const RETRY_DELAYS_MS = [2_000, 5_000, 15_000];
+
 const RESTART_MSG = "Máy chủ khởi động lại khi đang đăng; chưa gửi lệnh đăng cuối cùng. Kiểm tra Page rồi bấm Đăng lại.";
 
 /**
  * Đăng đều 1 video / intervalMin. Claim nguyên tử trong db.tx (BEGIN IMMEDIATE) nên nhiều tiến trình vẫn an toàn;
- * last_publish_at ghi NGAY khi claim nên restart/lỗi cũng không đăng dồn. Không tự thử lại: failed đứng yên.
+ * last_publish_at ghi NGAY khi claim nên restart/lỗi cũng không đăng dồn. Lỗi tạm thời ở bước start/upload được thử lại tối đa 3 lần; lỗi token/quyền tạm dừng hàng đợi; sau finish không bao giờ thử lại.
  */
 export class ReelsPublisher {
   private ctx: AppContext;
@@ -64,7 +69,8 @@ export class ReelsPublisher {
 
   /** Khôi phục các dòng 'publishing' còn sót sau restart (không bao giờ gọi lại finish) */
   async recover(): Promise<void> {
-    const rows = this.ctx.db.all<ReelPostRow>("SELECT * FROM fb_reel_posts WHERE status = 'publishing'");
+    const cutoff = new Date(this.now() - STALE_PUBLISHING_MS).toISOString();
+    const rows = this.ctx.db.all<ReelPostRow>("SELECT * FROM fb_reel_posts WHERE status = 'publishing' AND (publishing_at IS NULL OR publishing_at < ?)", cutoff);
     for (const r of rows) {
       const ws = r.workspace_id;
       if ((r.step === "finishing" || r.step === "finished") && r.fb_video_id) {
@@ -91,6 +97,7 @@ export class ReelsPublisher {
     return ctx.db.tx(() => {
       const cfg = getReelsConfig(ctx, ws);
       if (!cfg.autoEnabled || !cfg.tokenConfigured || !cfg.pageId) return null;
+      if (getReelsPause(ctx, ws)) return null; // tạm dừng do lỗi token/quyền, chờ người dùng bấm Tiếp tục
       if (ctx.db.get("SELECT 1 FROM fb_reel_posts WHERE workspace_id = ? AND status = 'publishing' LIMIT 1", ws)) return null;
       const now = this.now();
       let last = getLastPublishAt(ctx, ws);
@@ -127,7 +134,7 @@ export class ReelsPublisher {
 
   private markPublished(id: string, postId: string | null = null): void {
     const now = nowIso();
-    this.ctx.db.run("UPDATE fb_reel_posts SET status = 'published', fb_post_id = COALESCE(?, fb_post_id), step = 'finished', error_message = NULL, published_at = ?, updated_at = ? WHERE id = ?", postId, now, now, id);
+    this.ctx.db.run("UPDATE fb_reel_posts SET status = 'published', fb_post_id = COALESCE(?, fb_post_id), step = 'finished', error_message = NULL, published_at = ?, updated_at = ? WHERE id = ? AND status = 'publishing'", postId, now, now, id);
   }
 
   private markFailed(id: string, e: unknown, hint = ""): void {
@@ -140,8 +147,22 @@ export class ReelsPublisher {
     }
     const base = e instanceof GraphError || e instanceof Error ? e.message : String(e);
     const msg = redact(`${base}${hint ? ` ${hint}` : ""}`, [token]).replace(/EAA[A-Za-z0-9]{6,}/g, "***").slice(0, 600);
-    this.ctx.db.run("UPDATE fb_reel_posts SET status = 'failed', error_message = ?, updated_at = ? WHERE id = ?", msg, nowIso(), id);
+    this.ctx.db.run("UPDATE fb_reel_posts SET status = 'failed', error_message = ?, updated_at = ? WHERE id = ? AND status = 'publishing'", msg, nowIso(), id);
     this.log(`Đăng lỗi (${id}): ${msg}`);
+  }
+
+  /** Gọi bước an toàn (trước finish): lỗi tạm thời thì thử lại tối đa 3 lần, giãn cách tăng dần. Lỗi khác ném ngay. */
+  private async withRetry<T>(fn: () => Promise<T>, post: ReelPostRow): Promise<T> {
+    const sleep = this.o.sleep ?? realSleep;
+    for (let i = 0; ; i++) {
+      try {
+        return await fn();
+      } catch (e) {
+        if (!(e instanceof GraphError) || !isTransientKind(e.kind) || i >= RETRY_DELAYS_MS.length) throw e;
+        this.log(`Lỗi tạm thời (${post.id}), thử lại lần ${i + 1}/${RETRY_DELAYS_MS.length}`);
+        await sleep(RETRY_DELAYS_MS[i]!);
+      }
+    }
   }
 
   private async publish(post: ReelPostRow): Promise<void> {
@@ -160,9 +181,9 @@ export class ReelsPublisher {
         ctx.db.run("UPDATE fb_reel_posts SET caption = ?, updated_at = ? WHERE id = ?", caption, nowIso(), post.id);
       }
       const client = this.client(ws, cfg);
-      const { videoId, uploadUrl } = await client.startUpload();
+      const { videoId, uploadUrl } = await this.withRetry(() => client.startUpload(), post);
       this.setStep(post.id, "started", { fb_video_id: videoId });
-      await client.uploadFile(uploadUrl, file);
+      await this.withRetry(() => client.uploadFile(uploadUrl, file), post);
       this.setStep(post.id, "uploaded");
       // Ghi step TRƯỚC khi gọi finish: nếu mơ hồ thì coi như có thể đã đăng → chỉ polling
       this.setStep(post.id, "finishing");
@@ -175,6 +196,24 @@ export class ReelsPublisher {
     } catch (e) {
       const cur = ctx.db.get<{ step: string | null }>("SELECT step FROM fb_reel_posts WHERE id = ?", post.id);
       const ambiguous = cur?.step === "finishing" || cur?.step === "finished";
+      if (e instanceof GraphError && isAuthKind(e.kind)) {
+        // Lỗi token/quyền: tạm dừng cả hàng đợi của workspace để không đốt hết video
+        const kind = e.kind as "token" | "permission";
+        const token = (() => {
+          try {
+            return getPageToken(ctx, ws);
+          } catch {
+            return "";
+          }
+        })();
+        setReelsPause(ctx, ws, { kind, message: redact(e.message, [token]).replace(/EAA[A-Za-z0-9]{6,}/g, "***").slice(0, 400), at: nowIso() });
+        this.log(`Tạm dừng hàng đợi (${ws}): lỗi ${kind}`);
+        if (!ambiguous) {
+          // Chưa gửi lệnh đăng cuối: trả về hàng đợi, đăng tiếp sau khi người dùng bấm Tiếp tục
+          ctx.db.run("UPDATE fb_reel_posts SET status = 'approved', step = NULL, fb_video_id = NULL, updated_at = ? WHERE id = ? AND status = 'publishing'", nowIso(), post.id);
+          return;
+        }
+      }
       this.markFailed(post.id, e, ambiguous ? "Có thể video đã/đang được đăng; kiểm tra Page trước khi Đăng lại." : "");
     }
   }
