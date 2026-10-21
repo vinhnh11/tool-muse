@@ -9,7 +9,6 @@ import { ROOT_DIR } from "./config.ts";
 import type { AppContext } from "./context.ts";
 import * as auth from "./auth.ts";
 import { audit, eventToPublic, recordEvent, wake, type EventRow } from "./events.ts";
-import { AnalysisService } from "./analysis.ts";
 import { BatchService, type Actor, type BatchConfig, type BatchPromptInput } from "./batches.ts";
 import { ChatService } from "./chat.ts";
 import { DeployService, type DeploySelection } from "./deploy.ts";
@@ -61,7 +60,6 @@ export function createApp(ctx: AppContext): express.Express {
 
   const batches = new BatchService(ctx);
   const prompts = new PromptService(ctx);
-  const analyses = new AnalysisService(ctx);
   const sessions = new SessionService(ctx);
   const chat = new ChatService(ctx);
   const exporter = new ExportService(ctx);
@@ -395,26 +393,6 @@ export function createApp(ctx: AppContext): express.Express {
     }),
   );
 
-  // ------------------------------------------------------------ phân tích
-
-  app.get("/api/analyses", h((req) => ({ analyses: analyses.list(ws(req), { sessionId: (req.query.sessionId as string) || null, assetId: req.query.assetId as string | undefined }) })));
-  app.post(
-    "/api/analyses",
-    h((req) => {
-      const ids: string[] = Array.isArray(req.body?.assetIds) ? req.body.assetIds.map(String) : [];
-      if (!ids.length) throw new AppError("NO_ASSETS", "Chưa chọn video để phân tích.", 400);
-      return { analyses: ids.map((id) => analyses.request(ws(req), actorOf(req), id, req.body?.sessionId ?? null, { force: Boolean(req.body?.force) })) };
-    }),
-  );
-  app.get(
-    "/api/analyses/:id",
-    h((req) => {
-      const r = analyses.list(ws(req)).find((x) => x.id === String(req.params.id));
-      if (!r) throw new AppError("NOT_FOUND", "Không tìm thấy bản phân tích.", 404);
-      return r;
-    }),
-  );
-
   // ------------------------------------------------------------ prompt
 
   app.post(
@@ -451,7 +429,6 @@ export function createApp(ctx: AppContext): express.Express {
       const b = req.body ?? {};
       return prompts.generate(ws(req), actorOf(req), {
         sessionId: b.sessionId ?? null,
-        analysisIds: b.analysisIds ?? [],
         count: Number(b.count),
         durationSec: Number(b.durationSec),
         aspectRatio: String(b.aspectRatio),

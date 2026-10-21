@@ -6,7 +6,7 @@ import { AppError, newId, nowIso, redact, safeJsonParse } from "./util.ts";
 
 /**
  * CHAT AI điều phối (trong ứng dụng): LLM (qua LLM gateway, vd 9Router) gọi các
- * tool video_* để phân tích → sinh prompt → tạo batch CHỜ DUYỆT → theo dõi.
+ * tool video_* để sinh prompt → tạo batch CHỜ DUYỆT → theo dõi.
  * LLM chỉ suy luận; tạo video là việc của video provider; chạy là việc của worker.
  *
  * Chế độ:
@@ -86,15 +86,14 @@ export class ChatService {
     const providers = this.ctx.providers.list(workspaceId).filter((p) => p.enabled);
     const lines = [
       "Bạn là trợ lý điều phối AI Batch Video Studio. Trả lời TIẾNG VIỆT, ngắn gọn, rõ con số.",
-      "Bạn có các tool video_* để: liệt kê/phân tích video tham khảo, sinh prompt hàng loạt, kiểm/ước tính, tạo batch, theo dõi, hủy, tạo lại, xuất ZIP.",
+      "Bạn có các tool video_* để: liệt kê video, sinh prompt hàng loạt, kiểm/ước tính, tạo batch, theo dõi, hủy, tạo lại, xuất ZIP.",
       "LUẬT BẮT BUỘC:",
       "1. Không bao giờ tự chạy việc tốn phí. video_create_batch chỉ tạo batch CHỜ DUYỆT; sau đó nêu số video + chi phí ước tính và bảo người dùng bấm 'Duyệt & chạy' trên giao diện.",
       "2. Người dùng chỉ yêu cầu lên ý tưởng/prompt → dừng ở bộ prompt chờ duyệt, KHÔNG tạo batch.",
       "3. Người dùng muốn duyệt trước → dừng ở bước duyệt.",
-      "4. Phân tích video chạy nền: sau video_analyze, gọi video_get_analysis; nếu chưa xong thì báo tiến độ và đề nghị người dùng chờ rồi hỏi lại - không bịa kết quả.",
-      "5. Không bịa: chỉ báo những gì tool trả về. Nếu coverage.audio khác 'analyzed' thì nói rõ CHƯA phân tích âm thanh.",
-      "6. Trước khi chọn thông số, kiểm khả năng model bằng video_get_provider_capabilities. Model không hỗ trợ thời lượng/tỷ lệ → nói rõ và đề xuất phương án.",
-      "7. Người dùng nói 'triển khai' / 'làm video từ bộ prompt này' → gọi video_deploy_prompt_set với promptSetId: MỖI PROMPT = 1 VIDEO (N prompt → N video), không nhân bản. Nếu ngay từ đầu người dùng yêu cầu 'phân tích → sinh N prompt → triển khai luôn' thì sinh xong gọi video_deploy_prompt_set ngay. Provider miễn phí chạy luôn; provider tính phí dừng ở CHỜ DUYỆT, nêu số video + chi phí.",
+      "4. Không bịa: chỉ báo những gì tool trả về.",
+      "5. Trước khi chọn thông số, kiểm khả năng model bằng video_get_provider_capabilities. Model không hỗ trợ thời lượng/tỷ lệ → nói rõ và đề xuất phương án.",
+      "6. Người dùng nói 'triển khai' / 'làm video từ bộ prompt này' → gọi video_deploy_prompt_set với promptSetId: MỖI PROMPT = 1 VIDEO (N prompt → N video), không nhân bản. Nếu ngay từ đầu người dùng yêu cầu 'sinh N prompt → triển khai luôn' thì sinh xong gọi video_deploy_prompt_set ngay. Provider miễn phí chạy luôn; provider tính phí dừng ở CHỜ DUYỆT, nêu số video + chi phí.",
       `Chế độ: ${mode === "manual" ? "THỦ CÔNG - dùng đúng skill/provider/model người dùng đã chọn, không tự đổi." : "TỰ ĐỘNG - tự chọn skill phù hợp từ danh mục và provider/model trong số đang bật."}`,
       opts.providerConfigId ? `Provider người dùng chọn: ${opts.providerConfigId}${opts.modelId ? `, model ${opts.modelId}` : ""}.` : "",
       `Provider đang bật: ${providers.map((p) => `${p.id} (${p.name}, ${p.status}, model: ${p.capabilities.models.map((m) => m.modelId).join("/")}, giá: ${p.capabilities.pricing})`).join("; ") || "chưa có"}.`,

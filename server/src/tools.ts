@@ -5,7 +5,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { z, type ZodTypeAny } from "zod";
 import type { AppContext } from "./context.ts";
-import { AnalysisService } from "./analysis.ts";
 import { BatchService, defaultBatchConfig, type Actor, type BatchConfig, type BatchPromptInput } from "./batches.ts";
 import { DeployService } from "./deploy.ts";
 import { audit } from "./events.ts";
@@ -36,7 +35,7 @@ export interface ToolCallCtx {
 
 export interface ToolDef<S extends ZodTypeAny = ZodTypeAny> {
   name: string;
-  /** Tên theo đặc tả (video.analyze...) */
+  /** Tên theo đặc tả */
   alias: string;
   description: string;
   schema: S;
@@ -117,31 +116,6 @@ export const TOOLS: ToolDef[] = [
     },
   }),
   def({
-    name: "video_analyze",
-    alias: "video.analyze",
-    description: "Phân tích THẬT video tham khảo (trích khung hình phủ toàn video + âm thanh nếu đã cấu hình model nghe). Chạy nền - trả về id; dùng video_get_analysis để xem kết quả.",
-    schema: z.object({ assetIds: z.array(z.string()).min(1).max(20), force: z.boolean().optional() }),
-    async handler(ctx, c, a) {
-      const svc = new AnalysisService(ctx);
-      return { analyses: a.assetIds.map((id) => svc.request(c.workspaceId, actorOf(c), id, c.sessionId ?? null, { force: a.force })) };
-    },
-  }),
-  def({
-    name: "video_get_analysis",
-    alias: "video.get_analysis",
-    description: "Xem trạng thái/kết quả phân tích video (gồm coverage: số khung đã xem, âm thanh đã phân tích hay chưa).",
-    schema: z.object({ analysisIds: z.array(z.string()).min(1).max(20), full: z.boolean().optional() }),
-    async handler(ctx, c, a) {
-      const svc = new AnalysisService(ctx);
-      return {
-        analyses: a.analysisIds.map((id) => {
-          const x = svc.list(c.workspaceId).find((r) => r.id === id) ?? (() => { throw new AppError("NOT_FOUND", `Không có phân tích ${id}`, 404); })();
-          return a.full ? x : { id: x.id, assetId: x.assetId, status: x.status, progress: x.progress, step: x.step, error: x.error, coverage: { ...(x.coverage as object), frameTimes: undefined }, summary: x.result?.content.summary, hook: x.result?.hook, reusable_traits: x.result?.reusable_traits };
-        }),
-      };
-    },
-  }),
-  def({
     name: "video_get_provider_capabilities",
     alias: "video.get_provider_capabilities",
     description: "Danh sách provider video đang cấu hình + model, thời lượng, tỷ lệ, độ phân giải, âm thanh, khả năng hủy, chính sách giá. Gọi trước khi chọn thông số.",
@@ -156,9 +130,8 @@ export const TOOLS: ToolDef[] = [
   def({
     name: "video_generate_prompts",
     alias: "video.generate_prompts",
-    description: "AI sinh hàng loạt prompt video KHÁC NHAU từ các bản phân tích (đúng số lượng, tối ưu theo model). Tạo bộ prompt CHỜ DUYỆT - không tạo video, không tốn phí video.",
+    description: "AI sinh hàng loạt prompt video KHÁC NHAU từ mô tả/brief của người dùng (đúng số lượng, tối ưu theo model). Tạo bộ prompt CHỜ DUYỆT - không tạo video, không tốn phí video.",
     schema: z.object({
-      analysisIds: z.array(z.string()).default([]),
       count: z.number().int().min(1).max(10),
       durationSec: z.number().int(),
       aspectRatio: z.string(),

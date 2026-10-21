@@ -6,7 +6,7 @@ import { AppError } from "./util.ts";
 /**
  * TRIỂN KHAI bộ prompt thành video: mỗi prompt = đúng 1 video (N prompt → N video).
  *
- * Luồng: phân tích video → sinh bộ prompt (AI) → người dùng bấm "Triển khai" →
+ * Luồng: sinh bộ prompt (AI) → người dùng bấm "Triển khai" →
  * tạo batch từ bộ prompt (variantsPerPrompt luôn = 1) → chạy.
  *
  * Luật chi phí giữ nguyên như batch thường:

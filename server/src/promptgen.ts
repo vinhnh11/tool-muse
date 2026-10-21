@@ -2,7 +2,6 @@ import { z } from "zod";
 import type { AppContext } from "./context.ts";
 import { audit, recordEvent } from "./events.ts";
 import type { Actor } from "./batches.ts";
-import { analysisToPublic } from "./analysis.ts";
 import { checkList, toCsv, toTxt, type PromptDraft } from "./prompts.ts";
 import { AppError, newId, normalizeText, nowIso, safeJsonParse, similarity } from "./util.ts";
 import type { ModelCapabilities } from "./providers/types.ts";
@@ -38,19 +37,9 @@ const itemSchema = z.object({
   genre: z.string().default(""),
 });
 const chunkSchema = z.object({ items: z.array(itemSchema) });
-const dnaSchema = z.object({
-  core_ideas: z.array(z.string()).default([]),
-  styles: z.array(z.string()).default([]),
-  hooks: z.array(z.string()).default([]),
-  structures: z.array(z.string()).default([]),
-  visual_motifs: z.array(z.string()).default([]),
-  audio_cues: z.array(z.string()).default([]),
-  must_keep: z.array(z.string()).default([]),
-});
 
 export interface GenerateArgs {
   sessionId?: string | null;
-  analysisIds: string[];
   count: number;
   durationSec: number;
   aspectRatio: string;
@@ -301,31 +290,10 @@ export class PromptService {
     if (!caps.aspectRatios.includes(args.aspectRatio)) throw new AppError("ASPECT_UNSUPPORTED", `Model ${caps.label} không hỗ trợ tỷ lệ ${args.aspectRatio}.`, 422);
     const textModel = this.ctx.llm.model(workspaceId, "text");
 
-    const analyses = args.analysisIds.map((id) => {
-      const r = this.ctx.db.get<Parameters<typeof analysisToPublic>[0]>("SELECT * FROM video_analyses WHERE id = ? AND workspace_id = ?", id, workspaceId);
-      if (!r) throw new AppError("NOT_FOUND", `Không tìm thấy bản phân tích ${id}.`, 404);
-      if (r.status !== "completed") throw new AppError("ANALYSIS_NOT_READY", `Bản phân tích ${id} chưa xong (${r.status}).`, 409);
-      return analysisToPublic(r);
-    });
-
-    // 1. "ADN sáng tạo" từ các phân tích
-    let dna: z.infer<typeof dnaSchema> = { core_ideas: [], styles: [], hooks: [], structures: [], visual_motifs: [], audio_cues: [], must_keep: [] };
-    if (analyses.length) {
-      dna = await this.ctx.llm.json(workspaceId, {
-        model: textModel,
-        system:
-          'Tổng hợp các bản phân tích video tham khảo thành "ADN sáng tạo" để viết video mới. Tiếng Việt, DUY NHẤT JSON {"core_ideas":[],"styles":[],"hooks":[],"structures":[],"visual_motifs":[],"audio_cues":[],"must_keep":[]}. audio_cues chỉ lấy từ phần audio có status analyzed.',
-        user: JSON.stringify(analyses.map((a) => ({ coverage: { audio: (a.coverage as { audio?: string }).audio }, measurements: a.measurements, result: a.result }))),
-        schema: dnaSchema,
-        temperature: 0.4,
-        maxTokens: 2000,
-      });
-    }
-
-    // 2. Kế hoạch đa dạng: mỗi prompt một ô (genre × hook × cấu trúc × bối cảnh) KHÁC NHAU
+    // 1. Kế hoạch đa dạng: mỗi prompt một ô (genre × hook × cấu trúc × bối cảnh) KHÁC NHAU
     const genres = (args.genres?.length ? args.genres : ["product"]).filter((g) => g);
-    const hooks = [...new Set([...dna.hooks, ...HOOKS])];
-    const structures = [...new Set([...dna.structures, ...STRUCTURES])];
+    const hooks = [...HOOKS];
+    const structures = [...STRUCTURES];
     const slots: { slot: number; genre: string; hook: string; structure: string; setting: string }[] = [];
     for (let i = 0; i < count; i++) {
       slots.push({
@@ -351,7 +319,6 @@ export class PromptService {
     const context = {
       brief: args.brief ?? "",
       consistency: args.consistency ?? {},
-      creative_dna: dna,
       reference_assets: args.referenceAssetIds?.length ? `${args.referenceAssetIds.length} ảnh tham chiếu (sản phẩm/nhân vật) sẽ được gửi kèm cho model video - prompt phải nhắc giữ đúng ngoại hình chúng` : "",
     };
 
@@ -398,7 +365,7 @@ export class PromptService {
       sessionId: args.sessionId ?? null,
       name,
       source: "ai",
-      params: { ...args, model: args.modelId, dna, shortfall: count - accepted.length },
+      params: { ...args, model: args.modelId, shortfall: count - accepted.length },
       items: accepted.map((a) => ({
         title: a.title,
         objective: a.objective,
