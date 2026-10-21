@@ -4,10 +4,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { createEnv, tmpDir, userClient, type TestEnv } from "./helpers.ts";
 import { checkReelEligibility } from "../src/fbreels/eligibility.ts";
-import { getReelsConfig, saveReelsConfig } from "../src/fbreels/config.ts";
+import { getReelsConfig, getReelsPause, saveReelsConfig } from "../src/fbreels/config.ts";
 import { GraphError, GraphReelsClient } from "../src/fbreels/graph.ts";
 import { composeCaption, renderTemplate } from "../src/fbreels/caption.ts";
-import { enqueueReel, listQueue } from "../src/fbreels/queue.ts";
+import { enqueueReel, listQueue, sweepMissing } from "../src/fbreels/queue.ts";
 import { ReelsPublisher } from "../src/fbreels/publisher.ts";
 import { newId } from "../src/util.ts";
 
@@ -213,7 +213,11 @@ describe("hàng đợi, duyệt, lập lịch", () => {
     try {
       const a = addAsset(env, ws);
       assert.equal(enqueueReel(env.ctx, a), false);
-      configure(env, ws);
+      configure(env, ws, { autoEnabled: true });
+      // tắt tự động thì không xếp hàng (S4)
+      saveReelsConfig(env.ctx, ws, { autoEnabled: false });
+      assert.equal(enqueueReel(env.ctx, a), false);
+      saveReelsConfig(env.ctx, ws, { autoEnabled: true });
       assert.equal(enqueueReel(env.ctx, a), true);
       assert.equal(enqueueReel(env.ctx, a), false);
       assert.equal(env.ctx.db.all("SELECT 1 FROM fb_reel_posts").length, 1);
@@ -224,7 +228,7 @@ describe("hàng đợi, duyệt, lập lịch", () => {
       assert.match(statusOf(env, bad).skip_reason, /9:16/);
       const noReq = await setup("enq2");
       try {
-        configure(noReq.env, noReq.ws, { requireApproval: false });
+        configure(noReq.env, noReq.ws, { requireApproval: false, autoEnabled: true });
         const x = addAsset(noReq.env, noReq.ws);
         enqueueReel(noReq.env.ctx, x);
         assert.equal(statusOf(noReq.env, x).status, "approved");
@@ -264,7 +268,7 @@ describe("hàng đợi, duyệt, lập lịch", () => {
       assert.equal(q.items.length, 2);
       assert.ok(!JSON.stringify(q).includes(TOKEN));
       assert.equal((await c.req("DELETE", `/api/facebook/reels/queue/${qid}`)).status, 200);
-      assert.equal(env.ctx.db.all("SELECT 1 FROM fb_reel_posts WHERE id = ?", qid).length, 0);
+      assert.equal(env.ctx.db.get<any>("SELECT status FROM fb_reel_posts WHERE id = ?", qid).status, "removed");
       assert.ok(env.ctx.db.get("SELECT 1 FROM video_assets WHERE id = ?", a));
       assert.ok(fs.existsSync(env.ctx.storage.abs(`${ws}/${a}.mp4`)));
       assert.equal(listQueue(env.ctx, ws).items.length, 1);
@@ -304,8 +308,8 @@ describe("hàng đợi, duyệt, lập lịch", () => {
     }
   });
 
-  test("lỗi Graph -> failed có thông báo, không tự thử lại; Đăng lại -> approved", async () => {
-    const g = fakeGraph({ failStart: { error: { message: `bad ${TOKEN}`, code: 190, type: "OAuthException" } } });
+  test("lỗi Graph không phân loại -> failed có thông báo, không tự thử lại; Đăng lại -> approved", async () => {
+    const g = fakeGraph({ failStart: { error: { message: `bad ${TOKEN}`, code: 100 } } });
     const { env, c, ws } = await setup("fail", g.f);
     try {
       configure(env, ws, { autoEnabled: true, requireApproval: false, intervalMin: 5 });
@@ -383,3 +387,298 @@ describe("hàng đợi, duyệt, lập lịch", () => {
 });
 
 void getReelsConfig;
+
+// ---------------------------------------------------------------- vòng sửa theo review của Rex
+const mkPub = (env: TestEnv, t: () => number, extra: Record<string, unknown> = {}) =>
+  new ReelsPublisher(env.ctx, { now: t, sleep: async () => {}, log: () => {}, pollEveryMs: 1, ...extra });
+const rupCount = (g: { calls: Call[] }) => g.calls.filter((x) => x.url.includes("rupload")).length;
+
+describe("B1 xoá khỏi hàng rồi tick", () => {
+  test("xoá dòng đã published (không cần duyệt) -> tick không đăng lần hai, không hiện lại", async () => {
+    const g = fakeGraph();
+    const { env, c, ws } = await setup("b1a", g.f);
+    try {
+      configure(env, ws, { autoEnabled: true, requireApproval: false, intervalMin: 5 });
+      // job completed thật để sweepMissing nhặt được video (đường tự xếp lại trong review)
+      const a = addAsset(env, ws);
+      const now = new Date().toISOString();
+      const bid = newId("bat");
+      const jid = newId("job");
+      env.ctx.db.run(
+        "INSERT INTO video_batches (id, workspace_id, name, mode, provider_config_id, model_id, config_json, max_concurrency, status, created_at, updated_at) VALUES (?, ?, 'b', 'single', 'p', 'm', '{}', 1, 'completed', ?, ?)",
+        bid, ws, now, now,
+      );
+      env.ctx.db.run(
+        "INSERT INTO video_batch_jobs (id, batch_id, workspace_id, seq, prompt, provider_config_id, model_id, config_json, status, output_asset_id, lineage_id, created_at, updated_at) VALUES (?, ?, ?, 1, 'p', 'p', 'm', '{}', 'completed', ?, ?, ?, ?)",
+        jid, bid, ws, a, jid, now, now,
+      );
+      env.ctx.db.run("UPDATE video_assets SET source_job_id = ? WHERE id = ?", jid, a);
+      let t = 1_700_000_000_000;
+      const pub = mkPub(env, () => t);
+      await pub.tickOnce(); // sweepMissing xếp (approved) rồi đăng
+      assert.equal(statusOf(env, a).status, "published");
+      assert.equal((await c.req("DELETE", `/api/facebook/reels/queue/${statusOf(env, a).id}`)).status, 200);
+      for (let i = 0; i < 3; i++) {
+        t += 10 * 60_000;
+        await pub.tickOnce();
+      }
+      assert.equal(rupCount(g), 1, "không đăng lại");
+      assert.equal(env.ctx.db.all("SELECT 1 FROM fb_reel_posts WHERE asset_id = ?", a).length, 1, "dòng dấu vẫn còn, enqueue không tạo mới");
+      assert.equal(enqueueReel(env.ctx, a), false);
+      assert.equal(listQueue(env.ctx, ws).items.length, 0);
+    } finally {
+      await env.close();
+    }
+  });
+  test("sweepMissing bỏ qua dòng removed (pending_review xoá xong không hiện lại)", async () => {
+    const { env, c, ws } = await setup("b1b", fakeGraph().f);
+    try {
+      configure(env, ws, { autoEnabled: true });
+      const a = addAsset(env, ws);
+      enqueueReel(env.ctx, a);
+      const id = statusOf(env, a).id;
+      assert.equal((await c.req("DELETE", `/api/facebook/reels/queue/${id}`)).status, 200);
+      assert.equal(sweepMissing(env.ctx, ws), 0);
+      assert.equal(listQueue(env.ctx, ws).items.length, 0);
+      assert.equal((await c.req("DELETE", `/api/facebook/reels/queue/${id}`)).status, 404);
+      assert.equal((await c.post(`/api/facebook/reels/queue/${id}/approve`)).status, 404);
+    } finally {
+      await env.close();
+    }
+  });
+});
+
+describe("B2 tạm dừng khi lỗi token/quyền; thử lại lỗi tạm thời", () => {
+  for (const [name, err, kind] of [
+    ["190", { error: { message: "x", code: 190, type: "OAuthException" } }, "token"],
+    ["492", { error: { message: "x", code: 492 } }, "permission"],
+    ["200", { error: { message: "x", code: 200 } }, "permission"],
+  ] as const) {
+    test(`mã ${name} -> tạm dừng hàng đợi, bài về approved, Tiếp tục mới đăng`, async () => {
+      const g = fakeGraph({ failStart: err });
+      const { env, c, ws } = await setup(`b2_${name}`, g.f);
+      try {
+        configure(env, ws, { autoEnabled: true, requireApproval: false, intervalMin: 5 });
+        const a = addAsset(env, ws);
+        const b = addAsset(env, ws);
+        enqueueReel(env.ctx, a);
+        enqueueReel(env.ctx, b);
+        let t = 1_700_000_000_000;
+        const pub = mkPub(env, () => t);
+        await pub.tickOnce();
+        assert.equal(g.calls.length, 1, "auth không thử lại");
+        const q = (await c.get("/api/facebook/reels/queue")).body;
+        assert.equal(q.pause.kind, kind);
+        assert.ok(!JSON.stringify(q).includes(TOKEN));
+        assert.deepEqual(env.ctx.db.all<any>("SELECT status FROM fb_reel_posts").map((r) => r.status).sort(), ["approved", "approved"]);
+        t += 60 * 60_000;
+        await pub.tickOnce();
+        await pub.tickOnce();
+        assert.equal(g.calls.length, 1, "đang tạm dừng: không gọi Facebook");
+        assert.equal((await c.post("/api/facebook/reels/resume")).status, 200);
+        assert.equal((await c.get("/api/facebook/reels/queue")).body.pause, null);
+        await pub.tickOnce();
+        assert.equal(g.calls.length, 2, "sau Tiếp tục thì thử đăng lại");
+      } finally {
+        await env.close();
+      }
+    });
+  }
+  test("lỗi 5xx/mạng/rate-limit ở start: thử tối đa 3 lần giãn cách tăng dần rồi failed; thành công giữa chừng thì đăng", async () => {
+    // luôn lỗi 500
+    let n = 0;
+    const calls: Call[] = [];
+    const bad = (async (input: any, init: any = {}) => {
+      n++;
+      calls.push({ url: String(input), method: "POST", headers: {}, body: init.body ?? null, size: 0 });
+      return new Response(JSON.stringify({ error: { message: "oops", code: 2 } }), { status: 500 });
+    }) as typeof fetch;
+    const { env, ws } = await setup("b2_retry", bad);
+    try {
+      configure(env, ws, { autoEnabled: true, requireApproval: false, intervalMin: 5 });
+      const a = addAsset(env, ws);
+      enqueueReel(env.ctx, a);
+      const sleeps: number[] = [];
+      const pub = mkPub(env, () => 1_700_000_000_000, { sleep: async (ms: number) => void sleeps.push(ms) });
+      await pub.tickOnce();
+      assert.equal(n, 4, "1 lần đầu + 3 lần thử lại");
+      assert.deepEqual(sleeps, [2000, 5000, 15000]);
+      assert.equal(statusOf(env, a).status, "failed");
+      assert.equal(env.ctx.db.get<any>("SELECT COUNT(*) c FROM settings WHERE key='facebook_reels_state' AND value_json LIKE '%pause%\"kind%'").c, 0);
+    } finally {
+      await env.close();
+    }
+    // lỗi mạng 2 lần rồi ổn
+    const g = fakeGraph();
+    let fail = 2;
+    const flaky = (async (input: any, init: any) => {
+      if (String(input).includes("/video_reels") && JSON.parse(init.body).upload_phase === "start" && fail-- > 0) throw new TypeError("fetch failed");
+      return g.f(input, init);
+    }) as typeof fetch;
+    const s2 = await setup("b2_retry2", flaky);
+    try {
+      configure(s2.env, s2.ws, { autoEnabled: true, requireApproval: false });
+      const a = addAsset(s2.env, s2.ws);
+      enqueueReel(s2.env.ctx, a);
+      await mkPub(s2.env, () => 1_700_000_000_000).tickOnce();
+      assert.equal(statusOf(s2.env, a).status, "published");
+      assert.equal(rupCount(g), 1);
+    } finally {
+      await s2.env.close();
+    }
+  });
+  test("lỗi upload tạm thời cũng được thử lại; lỗi ở finish thì KHÔNG thử lại", async () => {
+    const g = fakeGraph();
+    let upFail = 1;
+    let finishCalls = 0;
+    const f = (async (input: any, init: any) => {
+      const url = String(input);
+      if (url.includes("rupload") && upFail-- > 0) return new Response("{}", { status: 503 });
+      if (url.includes("/video_reels") && JSON.parse(init.body).upload_phase === "finish") {
+        finishCalls++;
+        return new Response(JSON.stringify({ error: { message: "tmp", code: 2 } }), { status: 500 });
+      }
+      return g.f(input, init);
+    }) as typeof fetch;
+    const { env, ws } = await setup("b2_fin", f);
+    try {
+      configure(env, ws, { autoEnabled: true, requireApproval: false });
+      const a = addAsset(env, ws);
+      enqueueReel(env.ctx, a);
+      await mkPub(env, () => 1_700_000_000_000).tickOnce();
+      assert.equal(rupCount(g), 1, "upload lỗi 503 rồi thử lại thành công (chỉ lần thành công tới được fake)");
+      assert.equal(finishCalls, 1, "finish đúng 1 lần, không thử lại");
+      const row = statusOf(env, a);
+      assert.equal(row.status, "failed");
+      assert.match(row.error_message, /kiểm tra Page/);
+    } finally {
+      await env.close();
+    }
+  });
+  test("lỗi token ở finish (mơ hồ) -> failed + tạm dừng, không về approved", async () => {
+    const g = fakeGraph();
+    const f = (async (input: any, init: any) => {
+      if (String(input).includes("/video_reels") && JSON.parse(init.body).upload_phase === "finish") return new Response(JSON.stringify({ error: { message: "t", code: 190 } }), { status: 400 });
+      return g.f(input, init);
+    }) as typeof fetch;
+    const { env, ws } = await setup("b2_fin2", f);
+    try {
+      configure(env, ws, { autoEnabled: true, requireApproval: false });
+      const a = addAsset(env, ws);
+      enqueueReel(env.ctx, a);
+      await mkPub(env, () => 1_700_000_000_000).tickOnce();
+      assert.equal(statusOf(env, a).status, "failed");
+      assert.equal(getReelsPause(env.ctx, ws)?.kind, "token");
+    } finally {
+      await env.close();
+    }
+  });
+  test("phân loại Graph: 492 là permission, 5xx là server, mạng là network", async () => {
+    const mk = (err: unknown, status = 400) => new GraphReelsClient({ fetchImpl: (async () => new Response(JSON.stringify(err), { status })) as typeof fetch, pageId: PAGE, version: "v26.0", token: TOKEN });
+    await assert.rejects(mk({ error: { code: 492, message: "x" } }).startUpload(), (e: GraphError) => e.kind === "permission");
+    await assert.rejects(mk({}, 502).startUpload(), (e: GraphError) => e.kind === "server");
+    const net = new GraphReelsClient({ fetchImpl: (async () => { throw new TypeError("boom"); }) as typeof fetch, pageId: PAGE, version: "v26.0", token: TOKEN });
+    await assert.rejects(net.startUpload(), (e: GraphError) => e.kind === "network");
+  });
+});
+
+describe("S1 recover không phá bài của tiến trình khác", () => {
+  test("chỉ recover dòng publishing cũ hơn 15 phút; markPublished/markFailed cần status=publishing", async () => {
+    const g = fakeGraph();
+    const { env, ws } = await setup("s1", g.f);
+    try {
+      configure(env, ws, { autoEnabled: true, requireApproval: false });
+      const fresh = addAsset(env, ws);
+      const old = addAsset(env, ws);
+      enqueueReel(env.ctx, fresh);
+      enqueueReel(env.ctx, old);
+      const now = 1_700_000_000_000;
+      env.ctx.db.run("UPDATE fb_reel_posts SET status='publishing', step='uploaded', fb_video_id='v1', publishing_at=? WHERE asset_id = ?", new Date(now - 60_000).toISOString(), fresh);
+      env.ctx.db.run("UPDATE fb_reel_posts SET status='publishing', step='uploaded', fb_video_id='v2', publishing_at=? WHERE asset_id = ?", new Date(now - 16 * 60_000).toISOString(), old);
+      await mkPub(env, () => now).recover();
+      assert.equal(statusOf(env, fresh).status, "publishing", "bài mới của tiến trình khác giữ nguyên");
+      assert.equal(statusOf(env, old).status, "failed");
+      // bài đã bị đánh dấu khác thì markPublished/markFailed không ghi đè
+      const pub = mkPub(env, () => now) as any;
+      pub.markPublished(statusOf(env, old).id);
+      assert.equal(statusOf(env, old).status, "failed");
+      pub.markFailed(statusOf(env, fresh).id, new Error("x"));
+      assert.equal(statusOf(env, fresh).status, "failed");
+      env.ctx.db.run("UPDATE fb_reel_posts SET status='published' WHERE asset_id = ?", fresh);
+      pub.markFailed(statusOf(env, fresh).id, new Error("y"));
+      assert.equal(statusOf(env, fresh).status, "published");
+    } finally {
+      await env.close();
+    }
+  });
+});
+
+describe("S2 chỉ gửi token tới host Facebook", () => {
+  test("upload_url lạ / http -> báo lỗi, không gửi", async () => {
+    const file = path.join(tmpDir("s2"), "v.mp4");
+    fs.writeFileSync(file, Buffer.alloc(100, 1));
+    for (const bad of ["https://evil.example.com/up", "http://rupload.facebook.com/x", "https://facebook.com.evil.io/x", "https://evilfacebook.com/x", "not a url"]) {
+      const g = fakeGraph();
+      const cl = new GraphReelsClient({ fetchImpl: g.f, pageId: PAGE, version: "v26.0", token: TOKEN });
+      await assert.rejects(cl.uploadFile(bad, file), /không hợp lệ/);
+      assert.equal(g.calls.length, 0, bad);
+    }
+    for (const good of ["https://rupload.facebook.com/video-upload/v26.0/1", "https://cdn.fbcdn.net/x"]) {
+      const g = fakeGraph();
+      const cl = new GraphReelsClient({ fetchImpl: g.f, pageId: PAGE, version: "v26.0", token: TOKEN });
+      await cl.uploadFile(good, file);
+      assert.equal(g.calls.length, 1);
+    }
+  });
+});
+
+describe("S3 renderTemplate không nội suy $", () => {
+  test("$& $1 $' giữ nguyên", () => {
+    assert.equal(renderTemplate("{prompt}|{tieu_de}", { prompt: "a $& b $1 c $' d $$", tieu_de: "$`x" }), "a $& b $1 c $' d $$|$`x");
+  });
+});
+
+describe("S4 tắt rồi bật lại tự động", () => {
+  test("video làm lúc tắt không vào hàng; enabledSince cập nhật mỗi lần bật", async () => {
+    const { env, ws } = await setup("s4");
+    try {
+      configure(env, ws, { autoEnabled: true });
+      const s1 = getReelsConfig(env.ctx, ws).enabledSince;
+      assert.ok(s1);
+      saveReelsConfig(env.ctx, ws, { autoEnabled: false });
+      const during = addAsset(env, ws);
+      assert.equal(enqueueReel(env.ctx, during), false);
+      assert.equal(sweepMissing(env.ctx, ws), 0);
+      await new Promise((r) => setTimeout(r, 5));
+      saveReelsConfig(env.ctx, ws, { autoEnabled: true });
+      const s2 = getReelsConfig(env.ctx, ws).enabledSince!;
+      assert.ok(s2 > s1!);
+      assert.equal(sweepMissing(env.ctx, ws), 0, "video cũ (trước mốc mới) không được xếp");
+      assert.equal(env.ctx.db.all("SELECT 1 FROM fb_reel_posts").length, 0);
+    } finally {
+      await env.close();
+    }
+  });
+});
+
+describe("S6 retry bài đã từ chối", () => {
+  test("requireApproval=true -> pending_review; =false -> approved", async () => {
+    const { env, c, ws } = await setup("s6", fakeGraph().f);
+    try {
+      configure(env, ws, { autoEnabled: true });
+      const a = addAsset(env, ws);
+      enqueueReel(env.ctx, a);
+      const id = statusOf(env, a).id;
+      await c.post(`/api/facebook/reels/queue/${id}/reject`);
+      assert.equal((await c.post(`/api/facebook/reels/queue/${id}/retry`)).status, 200);
+      assert.equal(statusOf(env, a).status, "pending_review");
+      assert.equal(statusOf(env, a).approved_at, null);
+      await c.post(`/api/facebook/reels/queue/${id}/reject`);
+      saveReelsConfig(env.ctx, ws, { requireApproval: false });
+      assert.equal((await c.post(`/api/facebook/reels/queue/${id}/retry`)).status, 200);
+      assert.equal(statusOf(env, a).status, "approved");
+    } finally {
+      await env.close();
+    }
+  });
+});
