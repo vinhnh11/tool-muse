@@ -176,6 +176,16 @@ function QueueCard({ refreshKey }: { refreshKey: number }) {
   };
 
   const items = q.data?.items ?? [];
+  const pause = q.data?.pause ?? null;
+  const resume = async () => {
+    try {
+      await api.fbReelsResume();
+      toast.success("Đã tiếp tục hàng đợi");
+      q.reload();
+    } catch (e) {
+      toastApiError(toast, "Không tiếp tục được", e);
+    }
+  };
   return (
     <section className="card">
       <div className="card-head">
@@ -184,6 +194,18 @@ function QueueCard({ refreshKey }: { refreshKey: number }) {
           Làm mới
         </Button>
       </div>
+      {pause ? (
+        <Banner tone="danger" title={pause.kind === "token" ? "Hàng đợi đã tạm dừng: token Page hết hạn hoặc bị thu hồi" : "Hàng đợi đã tạm dừng: token thiếu quyền đăng lên Page"}
+          actions={
+            <Button size="sm" variant="primary" onClick={() => void resume()}>
+              Tiếp tục
+            </Button>
+          }
+        >
+          <div>{pause.message}</div>
+          <div className="muted small">Cập nhật Page access token trong phần Cấu hình bên dưới, bấm Lưu, rồi bấm Tiếp tục. Từ {fmtDate(pause.at)}.</div>
+        </Banner>
+      ) : null}
       {q.error ? <ErrorBanner error={q.error} onRetry={q.reload} /> : null}
       {q.loading && !q.data ? <Loading /> : null}
       {q.data && !items.length ? <EmptyState compact title="Chưa có video trong hàng đăng" description="Video làm xong (sau khi lưu token) sẽ xuất hiện ở đây." /> : null}

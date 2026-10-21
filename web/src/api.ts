@@ -617,7 +617,13 @@ export interface FbReelsConfig {
   updatedAt: string | null;
 }
 
-export type FbReelStatus = "pending_review" | "approved" | "publishing" | "published" | "failed" | "skipped" | "rejected";
+export type FbReelStatus = "pending_review" | "approved" | "publishing" | "published" | "failed" | "skipped" | "rejected" | "removed";
+
+export interface FbReelsPause {
+  kind: "token" | "permission";
+  message: string;
+  at: string;
+}
 
 export interface FbReelItem {
   id: string;
@@ -658,7 +664,8 @@ export const api = {
   fbReelsConfig: () => get<FbReelsConfig>("/api/facebook/reels/config"),
   saveFbReelsConfig: (body: Partial<Omit<FbReelsConfig, "tokenConfigured" | "tokenLast4" | "updatedAt" | "enabledSince">> & { pageToken?: string | null }) => put<FbReelsConfig>("/api/facebook/reels/config", body),
   testFbReels: () => post<{ ok: boolean; pageName?: string; message: string }>("/api/facebook/reels/config/test"),
-  fbReelsQueue: () => get<{ items: FbReelItem[] }>("/api/facebook/reels/queue"),
+  fbReelsQueue: () => get<{ items: FbReelItem[]; pause: FbReelsPause | null }>("/api/facebook/reels/queue"),
+  fbReelsResume: () => post<{ ok: boolean }>("/api/facebook/reels/resume"),
   fbReelsApprove: (id: string) => post<FbReelItem>(`/api/facebook/reels/queue/${enc(id)}/approve`),
   fbReelsReject: (id: string) => post<{ ok: boolean }>(`/api/facebook/reels/queue/${enc(id)}/reject`),
   fbReelsRetry: (id: string) => post<{ ok: boolean }>(`/api/facebook/reels/queue/${enc(id)}/retry`),

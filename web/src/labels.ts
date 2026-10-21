@@ -22,6 +22,7 @@ export const FB_REEL_STATUS_META: Record<string, { label: string; tone: Tone }> 
   failed: { label: "Lỗi", tone: "danger" },
   skipped: { label: "Bỏ qua", tone: "warning" },
   rejected: { label: "Đã từ chối", tone: "muted" },
+  removed: { label: "Đã xoá khỏi hàng", tone: "muted" },
 };
 
 export const BATCH_STATUS_META: Record<BatchStatus, { label: string; tone: Tone }> = {
