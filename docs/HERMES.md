@@ -29,12 +29,12 @@ Biến tùy chọn: `BVS_WORKSPACE` (chọn workspace), `BVS_EXPORT_DIR` (nơi `
 
 ## 4. Ví dụ câu lệnh tự nhiên
 
-- "Phân tích 6 video tham khảo trong phiên X, tạo 50 prompt quảng cáo 30 giây 9:16 theo phong cách tương tự, cho tôi duyệt trước khi chạy."
+- "Tạo 50 prompt quảng cáo serum 30 giây 9:16, cho tôi duyệt trước khi chạy."
 - "Ước tính chi phí 20 video Seedance 10 giây 720p."
 - "Batch Y chạy tới đâu rồi? Tạo lại các job lỗi."
 - "Xuất batch Y ra ZIP."
 
-Agent sẽ: `video_list_assets` → `video_analyze` → `video_get_analysis` → `video_generate_prompts` → `video_estimate_batch` → `video_create_batch` (chờ duyệt) → dừng và báo chi phí. Duyệt chạy bằng giao diện, hoặc agent gọi `video_approve_batch` với `confirm:true` + `approvedMaxCost` đúng bằng ước tính, chỉ khi người dùng đã đồng ý rõ ràng.
+Agent sẽ: `video_list_assets` → `video_generate_prompts` → `video_estimate_batch` → `video_create_batch` (chờ duyệt) → dừng và báo chi phí. Duyệt chạy bằng giao diện, hoặc agent gọi `video_approve_batch` với `confirm:true` + `approvedMaxCost` đúng bằng ước tính, chỉ khi người dùng đã đồng ý rõ ràng.
 
 ## CLI (không cần MCP)
 

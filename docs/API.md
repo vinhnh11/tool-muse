@@ -74,22 +74,12 @@ ChatMessage: `{ id, role:"user"|"assistant"|"tool", content, toolCalls:[{id,name
 
 Asset: `{ id, sessionId, kind, origin, fileName, mime, sizeBytes, sha256, durationSec, width, height, fps, videoCodec, hasAudio, inLibrary, sourceJobId, urls:{file,preview,thumbnail,download}, createdAt }`
 
-## Phân tích video
-- POST /api/analyses `{ assetIds, sessionId?, force? }` → `{ analyses: Analysis[] }` (chạy nền)
-- GET /api/analyses?sessionId=&assetId= → `{ analyses }` ; GET /api/analyses/:id
-
-Analysis: `{ id, sessionId, assetId, status:"queued"|"running"|"completed"|"failed", progress, step, models, error,
-  coverage:{ durationSec, segments, segmentSec, framesAnalyzed, hookFrames, frameTimes, sceneCutsDetected, wholeVideoCovered, audio:"analyzed"|"not_configured"|"no_audio_track"|"failed", audioChunks, notes:string[] },
-  measurements:{ durationSec,width,height,fps,hasAudio,sceneCuts,shotCount,avgShotSec,cutsPerMinute,silenceRatio,integratedLufs },
-  result:{ content:{summary,subjects,storyline:[{start,end,description}]}, hook:{first_seconds,technique,why_it_works}, visual_style:{look,lighting,color_palette,texture}, camera:{movements,shot_sizes,angles}, composition_transitions:{composition,transitions}, pacing_storytelling:{structure,rhythm}, audio:{status,dialogue_summary,music,sound_effects,voice,transcript}, reusable_traits, generation_hints:{genre,prompt_elements,avoid} } | null }`
-- PHẢI hiển thị rõ coverage (số khung đã xem, đã phủ toàn video chưa, âm thanh đã phân tích hay "chưa cấu hình model nghe").
-
 ## Prompt
 - POST /api/prompts/parse `{ text, fileName?, format? }` → `{ format, items:[{line,draft:{prompt,title?,negative?,durationSec?,aspectRatio?}}], blankLines:number[], errors, check:{totalLines,blankLines,duplicates:[{line,duplicateOfLine}],nearDuplicates:[{line,similarToLine,score}],uniqueLines}, summary }`
 - POST /api/prompts/check `{ providerConfigId, modelId, config, prompts:PromptInput[], blankLines?, lines? }` → BatchCheck
 - GET /api/prompt-sets?sessionId= → `{ sets:[{id,name,source,counts:{total,approved,rejected},createdAt}] }`
 - POST /api/prompt-sets `{ name, sessionId?, items?:PromptInput[] | text?:string, fileName? }`
-- POST /api/prompt-sets/generate `{ sessionId?, analysisIds:[], count, durationSec, aspectRatio, providerConfigId, modelId, genres?:string[], brief?, consistency?:{product?,brand?,character?}, referenceAssetIds?, language?:"vi"|"en", name? }` → `{ set, requested, generated, shortfall, duplicatesRemoved, nearDuplicates, message }` (LLM - có thể lâu)
+- POST /api/prompt-sets/generate `{ sessionId?, count, durationSec, aspectRatio, providerConfigId, modelId, genres?:string[], brief?, consistency?:{product?,brand?,character?}, referenceAssetIds?, language?:"vi"|"en", name? }` → `{ set, requested, generated, shortfall, duplicatesRemoved, nearDuplicates, message }` (LLM - có thể lâu)
 - GET /api/prompt-sets/:id → `{ id, name, source, params, items: PromptItem[], counts }`
 - POST /api/prompt-sets/:id/items `{ items: PromptInput[] }` ; POST /api/prompt-sets/:id/approval `{ itemIds: string[]|"all", approval:"approved"|"rejected"|"pending" }`
 - GET /api/prompt-sets/:id/export?format=txt|csv|json&onlyApproved=1
@@ -132,5 +122,5 @@ Job: `{ id, batchId, sessionId, seq, title, prompt, negative, referenceAssetIds,
 - GET /api/library?libraryOnly=1 → `{ items: (Asset & { batchId, batchName, sessionTitle, version, prompt })[] }`
 
 ## Sự kiện realtime (SSE)
-- GET /api/events (EventSource, cookie) - event types: `job.status`, `job.progress`, `job.created`, `batch.created`, `batch.approved`, `batch.paused`, `batch.resumed`, `batch.status`, `analysis.status`, `analysis.progress`, `prompts.progress`, `asset.deleted`, `batch.deleted`, ... data (Event): `{ id, type, batchId, jobId, from, to, message, data, at }` - đúng định dạng của GET /api/jobs/:id/events và /api/batches/:id/events.
+- GET /api/events (EventSource, cookie) - event types: `job.status`, `job.progress`, `job.created`, `batch.created`, `batch.approved`, `batch.paused`, `batch.resumed`, `batch.status`, `prompts.progress`, `asset.deleted`, `batch.deleted`, ... data (Event): `{ id, type, batchId, jobId, from, to, message, data, at }` - đúng định dạng của GET /api/jobs/:id/events và /api/batches/:id/events.
   Dùng để làm mới dữ liệu (refetch job/batch liên quan, debounce ~300ms). Video job nào xong là xem được ngay.

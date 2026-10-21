@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Bot, Clapperboard, Library, LogOut, Menu, PanelRightClose, PanelRightOpen, Plug, Plus, ScanSearch, Settings, X } from "lucide-react";
+import { Bot, Clapperboard, Library, LogOut, Menu, PanelRightClose, PanelRightOpen, Plug, Plus, Settings, X } from "lucide-react";
 import { ApprovalDialog } from "./components/ApprovalDialog";
 import { useDialogs } from "./components/ConfirmDialog";
 import { useToast } from "./components/Toast";
@@ -7,7 +7,6 @@ import { ChatPanel } from "./chat/ChatPanel";
 import { asApiError } from "./api";
 import { useLocalStorage } from "./hooks/useApi";
 import { useEventSource, type ConnectionState } from "./hooks/useEvents";
-import { AnalysisPage } from "./pages/AnalysisPage";
 import { BatchStudio } from "./pages/batch/BatchStudio";
 import { LibraryPage } from "./pages/LibraryPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
@@ -16,7 +15,6 @@ import { useStudio, type PageId } from "./state/studio";
 
 const NAV: { id: PageId; label: string; icon: ReactNode }[] = [
   { id: "batch", label: "Batch Studio", icon: <Clapperboard size={18} /> },
-  { id: "analysis", label: "Phân tích video", icon: <ScanSearch size={18} /> },
   { id: "library", label: "Thư viện", icon: <Library size={18} /> },
   { id: "providers", label: "Provider", icon: <Plug size={18} /> },
   { id: "settings", label: "Cài đặt", icon: <Settings size={18} /> },
@@ -189,7 +187,6 @@ export function Shell() {
         </header>
         <main className="page" id="main">
           {page === "batch" ? <BatchStudio /> : null}
-          {page === "analysis" ? <AnalysisPage /> : null}
           {page === "library" ? <LibraryPage /> : null}
           {page === "providers" ? <ProvidersPage /> : null}
           {page === "settings" ? <SettingsPage /> : null}

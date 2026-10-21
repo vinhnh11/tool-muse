@@ -15,8 +15,6 @@ const EVENT_TYPES = [
   "batch.paused",
   "batch.resumed",
   "batch.status",
-  "analysis.status",
-  "analysis.progress",
   "prompts.progress",
 ];
 

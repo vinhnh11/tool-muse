@@ -227,67 +227,6 @@ export interface LibraryItem extends Asset {
   prompt: string | null;
 }
 
-// ------------------------------------------------------------------ phân tích
-
-export type AudioCoverage = "analyzed" | "not_configured" | "no_audio_track" | "failed";
-
-export interface Coverage {
-  durationSec?: number;
-  segments?: number;
-  segmentSec?: number;
-  framesAnalyzed?: number;
-  hookFrames?: number;
-  frameTimes?: number[];
-  sceneCutsDetected?: number;
-  wholeVideoCovered?: boolean;
-  audio?: AudioCoverage;
-  audioChunks?: number;
-  audioError?: string;
-  notes?: string[];
-}
-
-export interface Measurements {
-  durationSec?: number;
-  width?: number | null;
-  height?: number | null;
-  fps?: number | null;
-  hasAudio?: boolean;
-  sceneCuts?: number[] | number;
-  shotCount?: number;
-  avgShotSec?: number | null;
-  cutsPerMinute?: number | null;
-  silenceRatio?: number | null;
-  integratedLufs?: number | null;
-}
-
-export interface AnalysisResult {
-  content: { summary: string; subjects: string[]; storyline: { start: number; end: number; description: string }[] };
-  hook: { first_seconds: string; technique: string; why_it_works: string };
-  visual_style: { look: string; lighting: string; color_palette: string[]; texture: string };
-  camera: { movements: string[]; shot_sizes: string[]; angles: string[] };
-  composition_transitions: { composition: string; transitions: string[] };
-  pacing_storytelling: { structure: string; rhythm: string };
-  audio: { status?: AudioCoverage; dialogue_summary: string; music: string; sound_effects: string[]; voice: string; transcript?: { start: number; end: number; text: string }[] };
-  reusable_traits: string[];
-  generation_hints: { genre: string; prompt_elements: string[]; avoid: string[] };
-}
-
-export interface Analysis {
-  id: string;
-  sessionId: string | null;
-  assetId: string;
-  status: "queued" | "running" | "completed" | "failed";
-  progress: number;
-  step: string | null;
-  models: { vision?: string; text?: string; audio?: string };
-  coverage: Coverage;
-  measurements: Measurements;
-  result: AnalysisResult | null;
-  error: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
 // ------------------------------------------------------------------ prompt
 
 export interface PromptDraft {
@@ -369,7 +308,6 @@ export interface PromptSetSummary {
 
 export interface GenerateBody {
   sessionId?: string | null;
-  analysisIds: string[];
   count: number;
   durationSec: number;
   aspectRatio: string;
@@ -713,9 +651,6 @@ export const api = {
   zip: async (assetIds: string[]): Promise<Blob> => (await rawFetch("POST", "/api/assets/zip", { assetIds })).blob(),
 
   // phân tích
-  analyses: (q: { sessionId?: string | null; assetId?: string }) => get<{ analyses: Analysis[] }>(`/api/analyses${qs({ sessionId: q.sessionId, assetId: q.assetId })}`),
-  analysis: (id: string) => get<Analysis>(`/api/analyses/${enc(id)}`),
-  requestAnalyses: (body: { assetIds: string[]; sessionId?: string | null; force?: boolean }) => post<{ analyses: Analysis[] }>("/api/analyses", body),
 
   // prompt
   parsePrompts: (body: { text: string; fileName?: string; format?: "txt" | "csv" | "json" }) => post<ParseResult>("/api/prompts/parse", body),

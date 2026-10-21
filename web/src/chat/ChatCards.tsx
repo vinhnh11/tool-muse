@@ -10,8 +10,6 @@ type Json = Record<string, unknown>;
 
 const TOOL_LABEL: Record<string, string> = {
   video_list_assets: "Liệt kê video",
-  video_analyze: "Phân tích video",
-  video_get_analysis: "Xem kết quả phân tích",
   video_get_provider_capabilities: "Xem khả năng provider",
   video_generate_prompts: "Sinh prompt",
   video_import_prompts: "Nhập prompt",

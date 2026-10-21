@@ -1,26 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
-import { Rocket, ScanSearch, Sparkles } from "lucide-react";
+import { useState } from "react";
+import { Rocket, Sparkles } from "lucide-react";
 import { api, asApiError, type ApiError, type GenerateResult } from "../../api";
 import { Button } from "../../components/Button";
-import { Banner, ErrorBanner, Loading } from "../../components/EmptyState";
+import { ErrorBanner } from "../../components/EmptyState";
 import { Checkbox, Field, Input, Select, TextArea } from "../../components/Field";
 import { FilterChip } from "../../components/Tabs";
-import { useApi, useLocalStorage } from "../../hooks/useApi";
-import { useRealtimeRefetch } from "../../hooks/useEvents";
-import { GENRES, fmtSeconds, truncate } from "../../labels";
+import { useLocalStorage } from "../../hooks/useApi";
+import { GENRES, fmtSeconds } from "../../labels";
 import { useStudio } from "../../state/studio";
 import type { ResolvedConfig } from "./useVideoConfig";
 
-/** "Tạo prompt bằng AI" từ các bản phân tích video của phiên */
-export const AI_PRESELECT_KEY = "bvs.ai.preselect";
-
+/** "Tạo prompt bằng AI" từ mô tả/brief của người dùng */
 export function AiGenerateForm({ cfg, onGenerated }: { cfg: ResolvedConfig; onGenerated: (r: GenerateResult, opts?: { deploy?: boolean }) => void }) {
-  const { sessionId, navigate } = useStudio();
-  const analyses = useApi(() => api.analyses({ sessionId }).then((r) => r.analyses), [sessionId]);
-  const assets = useApi(() => api.assets({ kind: "reference", sessionId }).then((r) => r.assets), [sessionId]);
-  useRealtimeRefetch((ev) => ev.type.startsWith("analysis."), () => void analyses.reload(), 600);
+  const { sessionId } = useStudio();
 
-  const [picked, setPicked] = useState<string[]>([]);
   const [count, setCount] = useState("10");
   const [genres, setGenres] = useState<string[]>(["product"]);
   const [brief, setBrief] = useState("");
@@ -33,24 +26,6 @@ export function AiGenerateForm({ cfg, onGenerated }: { cfg: ResolvedConfig; onGe
   const [error, setError] = useState<ApiError | null>(null);
   const [deployAfter, setDeployAfter] = useLocalStorage<boolean>("bvs.ai.deployAfter", false);
 
-  const completed = useMemo(() => (analyses.data ?? []).filter((a) => a.status === "completed"), [analyses.data]);
-
-  // Bấm "Tạo prompt từ bản phân tích" ở trang Phân tích → tự chọn sẵn các bản phân tích đó
-  useEffect(() => {
-    if (!analyses.data) return;
-    let pre: unknown = null;
-    try {
-      pre = JSON.parse(localStorage.getItem(AI_PRESELECT_KEY) ?? "null");
-    } catch {
-      pre = null;
-    }
-    if (!Array.isArray(pre) || !pre.length) return;
-    const ok = pre.filter((id): id is string => typeof id === "string" && completed.some((a) => a.id === id));
-    if (ok.length) setPicked(ok);
-    localStorage.removeItem(AI_PRESELECT_KEY);
-  }, [analyses.data, completed]);
-  const pending = (analyses.data ?? []).filter((a) => a.status === "queued" || a.status === "running").length;
-  const nameOf = (assetId: string) => assets.data?.find((a) => a.id === assetId)?.fileName ?? assetId;
   const countNum = Math.round(Number(count));
   const countValid = Number.isFinite(countNum) && countNum >= 1 && countNum <= 10;
 
@@ -62,7 +37,6 @@ export function AiGenerateForm({ cfg, onGenerated }: { cfg: ResolvedConfig; onGe
       const consistency = { product: product.trim() || undefined, brand: brand.trim() || undefined, character: character.trim() || undefined };
       const r = await api.generatePromptSet({
         sessionId,
-        analysisIds: picked,
         count: countNum,
         durationSec: cfg.state.durationSec,
         aspectRatio: cfg.state.aspectRatio,
@@ -85,41 +59,6 @@ export function AiGenerateForm({ cfg, onGenerated }: { cfg: ResolvedConfig; onGe
 
   return (
     <div className="ai-form">
-      <div className="field">
-        <span className="field-label">Bản phân tích làm nguồn ý tưởng ({picked.length} đã chọn)</span>
-        {analyses.loading ? <Loading inline /> : null}
-        {analyses.error ? <ErrorBanner error={analyses.error} compact onRetry={analyses.reload} /> : null}
-        {!analyses.loading && !completed.length ? (
-          <Banner
-            tone="neutral"
-            icon={<ScanSearch size={16} />}
-            actions={
-              <Button size="sm" variant="secondary" onClick={() => navigate("analysis")}>
-                Phân tích video
-              </Button>
-            }
-          >
-            {pending ? `${pending} video đang được phân tích. ` : "Phiên này chưa có bản phân tích hoàn thành. "}Bạn vẫn có thể sinh prompt chỉ từ brief bên dưới.
-          </Banner>
-        ) : (
-          <div className="pick-list">
-            {completed.map((a) => (
-              <Checkbox
-                key={a.id}
-                checked={picked.includes(a.id)}
-                onChange={(on) => setPicked((xs) => (on ? [...xs, a.id] : xs.filter((x) => x !== a.id)))}
-                label={
-                  <span className="pick-label">
-                    <strong>{nameOf(a.assetId)}</strong>
-                    <span className="muted small">{a.result?.content.summary ? truncate(a.result.content.summary, 120) : "Đã phân tích"}</span>
-                  </span>
-                }
-              />
-            ))}
-          </div>
-        )}
-      </div>
-
       <div className="grid-3">
         <Field label="Số prompt" error={!countValid ? "Từ 1 đến 10" : undefined}>
           <Input type="number" min={1} max={10} value={count} onChange={(e) => setCount(e.target.value)} />

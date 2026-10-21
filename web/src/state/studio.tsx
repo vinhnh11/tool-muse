@@ -3,8 +3,8 @@ import { api, type ApiError, type BatchEstimate, type Me, type ProviderConfig, t
 import { useApi, useLocalStorage } from "../hooks/useApi";
 import { useRealtimeRefetch } from "../hooks/useEvents";
 
-export type PageId = "batch" | "analysis" | "library" | "providers" | "settings";
-export const PAGES: PageId[] = ["batch", "analysis", "library", "providers", "settings"];
+export type PageId = "batch" | "library" | "providers" | "settings";
+export const PAGES: PageId[] = ["batch", "library", "providers", "settings"];
 
 function readHash(): PageId {
   const h = window.location.hash.replace(/^#\/?/, "").split(/[/?]/)[0] as PageId;

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { BatchStatus, JobStatus } from "../api";
-import { ANALYSIS_STATUS_META, APPROVAL_META, BATCH_STATUS_META, JOB_STATUS_META, PROVIDER_STATUS_META, type Tone } from "../labels";
+import { APPROVAL_META, BATCH_STATUS_META, JOB_STATUS_META, PROVIDER_STATUS_META, type Tone } from "../labels";
 
 export function Badge({ tone = "neutral", children, dot, title, className }: { tone?: Tone; children: ReactNode; dot?: boolean; title?: string; className?: string }) {
   return (
@@ -23,15 +23,6 @@ export function JobStatusBadge({ status }: { status: JobStatus }) {
 
 export function BatchStatusBadge({ status }: { status: BatchStatus }) {
   const m = BATCH_STATUS_META[status] ?? { label: status, tone: "neutral" as Tone };
-  return (
-    <Badge tone={m.tone} dot className={status === "running" ? "badge-live" : undefined}>
-      {m.label}
-    </Badge>
-  );
-}
-
-export function AnalysisStatusBadge({ status }: { status: string }) {
-  const m = ANALYSIS_STATUS_META[status] ?? { label: status, tone: "neutral" as Tone };
   return (
     <Badge tone={m.tone} dot className={status === "running" ? "badge-live" : undefined}>
       {m.label}

@@ -1,4 +1,4 @@
-import type { Approval, AudioCoverage, BatchStatus, GenerationMode, JobStatus, PricingKind } from "./api";
+import type { Approval, BatchStatus, GenerationMode, JobStatus, PricingKind } from "./api";
 
 export type Tone = "neutral" | "accent" | "info" | "success" | "warning" | "danger" | "muted" | "violet" | "cyan";
 
@@ -21,13 +21,6 @@ export const BATCH_STATUS_META: Record<BatchStatus, { label: string; tone: Tone 
   paused: { label: "Tạm dừng", tone: "warning" },
   completed: { label: "Hoàn thành", tone: "success" },
   cancelled: { label: "Đã hủy", tone: "muted" },
-};
-
-export const ANALYSIS_STATUS_META: Record<string, { label: string; tone: Tone }> = {
-  queued: { label: "Trong hàng đợi", tone: "neutral" },
-  running: { label: "Đang phân tích", tone: "accent" },
-  completed: { label: "Hoàn thành", tone: "success" },
-  failed: { label: "Lỗi", tone: "danger" },
 };
 
 export const APPROVAL_META: Record<Approval, { label: string; tone: Tone }> = {
@@ -77,13 +70,6 @@ export const GENRES: { id: string; label: string }[] = [
   { id: "unboxing", label: "Đập hộp (unboxing)" },
 ];
 
-export const AUDIO_COVERAGE_TEXT: Record<AudioCoverage, { text: string; tone: Tone }> = {
-  analyzed: { text: "Đã phân tích âm thanh", tone: "success" },
-  not_configured: { text: "Chưa cấu hình model nghe - chưa phân tích âm thanh", tone: "warning" },
-  no_audio_track: { text: "Video không có tiếng", tone: "muted" },
-  failed: { text: "Phân tích âm thanh lỗi", tone: "danger" },
-};
-
 export const EVENT_TYPE_LABEL: Record<string, string> = {
   "job.status": "Đổi trạng thái",
   "job.progress": "Tiến độ",
@@ -93,8 +79,6 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   "batch.paused": "Tạm dừng",
   "batch.resumed": "Tiếp tục",
   "batch.status": "Trạng thái batch",
-  "analysis.status": "Phân tích",
-  "analysis.progress": "Tiến độ phân tích",
   "prompts.progress": "Sinh prompt",
 };
 

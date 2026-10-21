@@ -1,8 +1,8 @@
 # Batch Video Studio
 
-Ứng dụng độc lập để tạo video AI hàng loạt: phân tích video tham khảo → AI sinh N prompt khác nhau → duyệt → chạy batch qua video provider với hàng đợi bền vững → xem, tải, tạo phiên bản mới, xuất ZIP. Điều khiển được bằng giao diện web, chat AI trong ứng dụng, CLI, và MCP (cho Hermes Agent / Claude Code).
+Ứng dụng độc lập để tạo video AI hàng loạt: AI sinh N prompt khác nhau → duyệt → chạy batch qua video provider với hàng đợi bền vững → xem, tải, tạo phiên bản mới, xuất ZIP. Điều khiển được bằng giao diện web, chat AI trong ứng dụng, CLI, và MCP (cho Hermes Agent / Claude Code).
 
-Không phụ thuộc D:\AIEV hay dịch vụ ngoài nào ngoài: ffmpeg/ffprobe, một LLM gateway chuẩn OpenAI (cho phân tích/sinh prompt/chat) và API của video provider (Seedance BytePlus).
+Không phụ thuộc D:\AIEV hay dịch vụ ngoài nào ngoài: ffmpeg/ffprobe, một LLM gateway chuẩn OpenAI (cho sinh prompt/chat) và API của video provider (Seedance BytePlus).
 
 ## Yêu cầu
 
@@ -30,7 +30,7 @@ Worker chạy chung tiến trình (`WORKER_MODE=inline`). Muốn tách: đặt `
 
 ## Cấu hình lần đầu (trên giao diện)
 
-1. **Cài đặt → LLM gateway**: base URL chuẩn OpenAI (`.../v1`, ví dụ 9Router `http://127.0.0.1:20128/v1`, OpenRouter, LiteLLM), API key, model chữ, model xem hình (vision), model nghe (tùy chọn - bỏ trống thì KHÔNG phân tích âm thanh và kết quả ghi rõ "chưa phân tích âm thanh").
+1. **Cài đặt → LLM gateway**: base URL chuẩn OpenAI (`.../v1`, ví dụ 9Router `http://127.0.0.1:20128/v1`, OpenRouter, LiteLLM), API key, model chữ.
 2. **Provider → Thêm provider → Seedance - BytePlus ModelArk**: API key, model, số luồng, yêu cầu/phút, đơn giá (để ước tính chi phí). Xem `docs/providers/seedance-byteplus.md`.
 3. **Kiểm tra kết nối** trên thẻ provider (không tạo video, không tốn phí).
 
@@ -38,13 +38,12 @@ Key được mã hóa AES-256-GCM trong DB bằng khóa chủ `APP_MASTER_KEY` h
 
 ## Luồng làm việc
 
-1. **Phân tích video**: tải 1 hoặc nhiều video → Phân tích. Hệ thống đo bằng ffmpeg (mốc chuyển cảnh thật, khoảng lặng, độ to), lấy khung hình phủ TOÀN BỘ thời lượng (dày ở 3 giây đầu cho hook + tại từng mốc chuyển cảnh), gửi theo đoạn cho model vision, gửi âm thanh theo khúc cho model nghe (nếu cấu hình), rồi tổng hợp JSON có cấu trúc. Ô "Độ phủ phân tích" ghi trung thực số khung đã xem, đã phủ toàn video chưa, âm thanh đã phân tích hay chưa.
-2. **Batch Studio**: 4 chế độ - Tạo đơn / Danh sách prompt (mỗi dòng một prompt, hiện "50 dòng → 50 video") / Nhập file TXT·CSV·JSON / Tạo prompt bằng AI (từ các bản phân tích, đúng số lượng, chống trùng, theo giới hạn model).
-3. **Duyệt prompt**: sửa, xóa, nhân bản, AI viết lại từng prompt, duyệt/loại, xuất TXT/CSV/JSON.
-4. **Kiểm tra + ước tính**: chặn trước khi gọi provider - dòng trống, trùng, quá dài, thời lượng/tỷ lệ/độ phân giải model không hỗ trợ, negative prompt khi model không hỗ trợ, ngân sách.
-5. **Tạo batch** → luôn ở trạng thái **Chờ duyệt**. **Duyệt & chạy** yêu cầu xác nhận đúng chi phí ước tính (hoặc tích chấp nhận chi phí không xác định).
-6. **Theo dõi**: bảng/lưới job cập nhật realtime (SSE), video nào xong xem được ngay. Tạm dừng, tiếp tục, hủy job chưa chạy, hủy từng job (provider chỉ hủy được khi task còn xếp hàng), tạo lại job lỗi, tạo phiên bản mới (V2, V3... giữ nguyên V1), so sánh phiên bản.
-7. **Xuất**: ZIP (video + manifest.json + prompts.csv/txt), CSV/JSON metadata, TXT prompt; Thư viện gom theo batch/phiên.
+1. **Batch Studio**: 4 chế độ - Tạo đơn / Danh sách prompt (mỗi dòng một prompt, hiện "50 dòng → 50 video") / Nhập file TXT·CSV·JSON / Tạo prompt bằng AI (từ mô tả/brief, đúng số lượng, chống trùng, theo giới hạn model).
+2. **Duyệt prompt**: sửa, xóa, nhân bản, AI viết lại từng prompt, duyệt/loại, xuất TXT/CSV/JSON.
+3. **Kiểm tra + ước tính**: chặn trước khi gọi provider - dòng trống, trùng, quá dài, thời lượng/tỷ lệ/độ phân giải model không hỗ trợ, negative prompt khi model không hỗ trợ, ngân sách.
+4. **Tạo batch** → luôn ở trạng thái **Chờ duyệt**. **Duyệt & chạy** yêu cầu xác nhận đúng chi phí ước tính (hoặc tích chấp nhận chi phí không xác định).
+5. **Theo dõi**: bảng/lưới job cập nhật realtime (SSE), video nào xong xem được ngay. Tạm dừng, tiếp tục, hủy job chưa chạy, hủy từng job (provider chỉ hủy được khi task còn xếp hàng), tạo lại job lỗi, tạo phiên bản mới (V2, V3... giữ nguyên V1), so sánh phiên bản.
+6. **Xuất**: ZIP (video + manifest.json + prompts.csv/txt), CSV/JSON metadata, TXT prompt; Thư viện gom theo batch/phiên.
 
 ## Hàng đợi bền vững - đảm bảo gì
 
@@ -60,7 +59,7 @@ Key được mã hóa AES-256-GCM trong DB bằng khóa chủ `APP_MASTER_KEY` h
 Cùng một bộ tool `video_*` dùng cho: chat AI trong ứng dụng, MCP server, CLI, REST `POST /api/tools/:name`.
 
 ```
-video_list_assets  video_analyze  video_get_analysis  video_get_provider_capabilities
+video_list_assets  video_get_provider_capabilities
 video_generate_prompts  video_import_prompts  video_estimate_batch  video_create_batch
 video_approve_batch  video_get_batch_status  video_pause_batch  video_resume_batch
 video_cancel_job  video_retry_job  video_get_result  video_regenerate  video_export_batch
@@ -92,7 +91,7 @@ server/src/
   batches.ts                  batch/job: kiểm tra, ước tính, duyệt, phiên bản, ngân sách
   scheduler.ts, worker.ts     hàng đợi bền vững: lease, concurrency, rate limit, retry, poll, tải kết quả
   providers/                  types.ts (interface), registry.ts, mock.ts, seedance.ts
-  analysis.ts, media.ts       phân tích video (ffmpeg + vision + audio)
+  media.ts                    tiện ích ffmpeg/ffprobe
   promptgen.ts, prompts.ts    sinh prompt hàng loạt / nhập-xuất-kiểm TXT CSV JSON
   chat.ts, tools.ts, sessions.ts   chat AI + bộ tool dùng chung + skill
   mcp.ts, cli.ts              MCP server (stdio) + CLI
