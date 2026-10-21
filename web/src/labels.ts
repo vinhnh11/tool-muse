@@ -56,7 +56,8 @@ export const QUALITY_LABEL: Record<string, string> = {
 export const PRICING_LABEL: Record<PricingKind, string> = {
   "free-mock": "Mock - miễn phí",
   "user-configured": "Theo đơn giá bạn nhập",
-  unknown: "Chưa có đơn giá",
+  // Gồm cả muse2api: không tính tiền theo request nhưng TIÊU HẠN MỨC tài khoản → không được hiểu là miễn phí
+  unknown: "Không xác định (phải tự xác nhận khi chạy)",
 };
 
 export const CANCEL_LABEL: Record<string, string> = {

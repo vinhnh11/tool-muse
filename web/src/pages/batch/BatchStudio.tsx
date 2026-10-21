@@ -13,10 +13,11 @@ import { fmtNumber } from "../../labels";
 import { useStudio } from "../../state/studio";
 import { AiGenerateForm } from "./AiGenerateForm";
 import { BatchesSection } from "./BatchesSection";
+import { DeployDialog } from "./DeployDialog";
 import { FileImport, LineCounter, LIST_PLACEHOLDER, MakeSetButton, type CreateTab } from "./CreateArea";
 import { PromptSetPanel } from "./PromptSetPanel";
 import { useVideoConfig } from "./useVideoConfig";
-import { VideoConfigPanel } from "./VideoConfigPanel";
+import { ReferencePicker, VideoConfigPanel } from "./VideoConfigPanel";
 
 interface FileState {
   name: string;
@@ -79,6 +80,9 @@ export function BatchStudio() {
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState<ApiError | { message: string } | null>(null);
   const resultRef = useRef<HTMLDivElement>(null);
+  // Triển khai bộ prompt (mỗi prompt = 1 video). pendingAuto: sinh xong bằng AI → mở triển khai luôn
+  const [deploy, setDeploy] = useState<{ setId: string; auto: boolean } | null>(null);
+  const [pendingAuto, setPendingAuto] = useState<string | null>(null);
 
   const set = useApi(() => (activeSetId ? api.promptSet(activeSetId) : Promise.resolve(null)), [activeSetId]);
   useRealtimeRefetch((ev) => Boolean(activeSetId) && ev.type === "local.promptSet", () => void set.reload(), 100);
@@ -237,10 +241,11 @@ export function BatchStudio() {
     }
   };
 
-  const onGenerated = (r: GenerateResult) => {
+  const onGenerated = (r: GenerateResult, opts?: { deploy?: boolean }) => {
     setActiveSetId(r.set.id);
     setUseSet(true);
     emitLocal({ type: "local.promptSets" });
+    if (opts?.deploy && r.generated > 0) setPendingAuto(r.set.id);
     if (r.shortfall > 0) toast.show({ kind: "warning", title: `AI tạo ${r.generated}/${r.requested} prompt`, detail: r.message }, 9000);
     else toast.success(r.message);
   };
@@ -266,6 +271,14 @@ export function BatchStudio() {
   };
 
   const canAct = Boolean(cfg.provider && cfg.model) && !busy;
+
+  // Bộ prompt vừa sinh đã tải xong → mở triển khai (Mock chạy luôn, provider tính phí vẫn hỏi chi phí)
+  useEffect(() => {
+    if (pendingAuto && set.data?.id === pendingAuto) {
+      setDeploy({ setId: pendingAuto, auto: true });
+      setPendingAuto(null);
+    }
+  }, [pendingAuto, set.data]);
 
   return (
     <div className="studio">
@@ -313,6 +326,9 @@ export function BatchStudio() {
               </>
             ) : null}
             {tab === "ai" ? <AiGenerateForm cfg={cfg} onGenerated={onGenerated} /> : null}
+          </div>
+          <div className="create-refs">
+            <ReferencePicker cfg={cfg} />
           </div>
         </section>
 
@@ -380,7 +396,12 @@ export function BatchStudio() {
         setOnlyApproved={setOnlyApproved}
         useItemOverrides={useItemOverrides}
         setUseItemOverrides={setUseItemOverrides}
+        onDeploy={() => set.data && setDeploy({ setId: set.data.id, auto: false })}
       />
+
+      {deploy && set.data?.id === deploy.setId ? (
+        <DeployDialog set={set.data} cfg={cfg} selection={onlyApproved ? "approved" : "all"} useItemOverrides={useItemOverrides} autoRunFree={deploy.auto} onClose={() => setDeploy(null)} />
+      ) : null}
 
       <BatchesSection />
     </div>

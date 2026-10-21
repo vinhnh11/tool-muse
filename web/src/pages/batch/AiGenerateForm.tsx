@@ -1,18 +1,20 @@
-import { useMemo, useState } from "react";
-import { ScanSearch, Sparkles } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Rocket, ScanSearch, Sparkles } from "lucide-react";
 import { api, asApiError, type ApiError, type GenerateResult } from "../../api";
 import { Button } from "../../components/Button";
 import { Banner, ErrorBanner, Loading } from "../../components/EmptyState";
 import { Checkbox, Field, Input, Select, TextArea } from "../../components/Field";
 import { FilterChip } from "../../components/Tabs";
-import { useApi } from "../../hooks/useApi";
+import { useApi, useLocalStorage } from "../../hooks/useApi";
 import { useRealtimeRefetch } from "../../hooks/useEvents";
 import { GENRES, fmtSeconds, truncate } from "../../labels";
 import { useStudio } from "../../state/studio";
 import type { ResolvedConfig } from "./useVideoConfig";
 
 /** "Tạo prompt bằng AI" từ các bản phân tích video của phiên */
-export function AiGenerateForm({ cfg, onGenerated }: { cfg: ResolvedConfig; onGenerated: (r: GenerateResult) => void }) {
+export const AI_PRESELECT_KEY = "bvs.ai.preselect";
+
+export function AiGenerateForm({ cfg, onGenerated }: { cfg: ResolvedConfig; onGenerated: (r: GenerateResult, opts?: { deploy?: boolean }) => void }) {
   const { sessionId, navigate } = useStudio();
   const analyses = useApi(() => api.analyses({ sessionId }).then((r) => r.analyses), [sessionId]);
   const assets = useApi(() => api.assets({ kind: "reference", sessionId }).then((r) => r.assets), [sessionId]);
@@ -29,12 +31,28 @@ export function AiGenerateForm({ cfg, onGenerated }: { cfg: ResolvedConfig; onGe
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
+  const [deployAfter, setDeployAfter] = useLocalStorage<boolean>("bvs.ai.deployAfter", false);
 
   const completed = useMemo(() => (analyses.data ?? []).filter((a) => a.status === "completed"), [analyses.data]);
+
+  // Bấm "Tạo prompt từ bản phân tích" ở trang Phân tích → tự chọn sẵn các bản phân tích đó
+  useEffect(() => {
+    if (!analyses.data) return;
+    let pre: unknown = null;
+    try {
+      pre = JSON.parse(localStorage.getItem(AI_PRESELECT_KEY) ?? "null");
+    } catch {
+      pre = null;
+    }
+    if (!Array.isArray(pre) || !pre.length) return;
+    const ok = pre.filter((id): id is string => typeof id === "string" && completed.some((a) => a.id === id));
+    if (ok.length) setPicked(ok);
+    localStorage.removeItem(AI_PRESELECT_KEY);
+  }, [analyses.data, completed]);
   const pending = (analyses.data ?? []).filter((a) => a.status === "queued" || a.status === "running").length;
   const nameOf = (assetId: string) => assets.data?.find((a) => a.id === assetId)?.fileName ?? assetId;
   const countNum = Math.round(Number(count));
-  const countValid = Number.isFinite(countNum) && countNum >= 1 && countNum <= 200;
+  const countValid = Number.isFinite(countNum) && countNum >= 1 && countNum <= 10;
 
   const submit = async () => {
     if (!cfg.provider || !cfg.model) return;
@@ -57,7 +75,7 @@ export function AiGenerateForm({ cfg, onGenerated }: { cfg: ResolvedConfig; onGe
         language,
         name: name.trim() || undefined,
       });
-      onGenerated(r);
+      onGenerated(r, { deploy: deployAfter });
     } catch (e) {
       setError(asApiError(e));
     } finally {
@@ -103,8 +121,8 @@ export function AiGenerateForm({ cfg, onGenerated }: { cfg: ResolvedConfig; onGe
       </div>
 
       <div className="grid-3">
-        <Field label="Số prompt" error={!countValid ? "Từ 1 đến 200" : undefined}>
-          <Input type="number" min={1} max={200} value={count} onChange={(e) => setCount(e.target.value)} />
+        <Field label="Số prompt" error={!countValid ? "Từ 1 đến 10" : undefined}>
+          <Input type="number" min={1} max={10} value={count} onChange={(e) => setCount(e.target.value)} />
         </Field>
         <Field label="Ngôn ngữ prompt">
           <Select
@@ -151,12 +169,25 @@ export function AiGenerateForm({ cfg, onGenerated }: { cfg: ResolvedConfig; onGe
         </div>
       </details>
 
+      <Checkbox
+        checked={deployAfter}
+        onChange={setDeployAfter}
+        label={
+          <span className="pick-label">
+            <strong>
+              <Rocket size={13} aria-hidden /> Sinh xong triển khai luôn
+            </strong>
+            <span className="muted small">Mỗi prompt = 1 video ({countValid ? `${countNum} prompt → ${countNum} video` : "N prompt → N video"}). Mock chạy ngay; provider tính phí vẫn hiện chi phí để bạn xác nhận.</span>
+          </span>
+        }
+      />
+
       <div className="ai-form-foot">
         <span className="muted small">
           Prompt viết cho {cfg.model ? <code>{cfg.model.modelId}</code> : "model đã chọn"} · {fmtSeconds(cfg.state.durationSec)} · {cfg.state.aspectRatio} (lấy từ Cấu hình video). Có thể mất 1-2 phút.
         </span>
         <Button variant="primary" icon={<Sparkles size={16} />} loading={busy} disabled={!cfg.model || !countValid || busy} onClick={submit}>
-          {busy ? "AI đang viết prompt..." : `Tạo ${countValid ? countNum : ""} prompt bằng AI`}
+          {busy ? "AI đang viết prompt..." : deployAfter ? `Tạo ${countValid ? countNum : ""} prompt & triển khai` : `Tạo ${countValid ? countNum : ""} prompt bằng AI`}
         </Button>
       </div>
       <ErrorBanner error={error} title="Không sinh được prompt" />

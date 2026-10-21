@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { BookmarkCheck, BookmarkMinus, BookmarkPlus, Download, FileArchive, Film, Library, RefreshCw, X } from "lucide-react";
+import { BookmarkCheck, BookmarkMinus, BookmarkPlus, Download, FileArchive, Film, Library, RefreshCw, Trash2, X } from "lucide-react";
 import { api, exportUrls, type LibraryItem } from "../api";
 import { VersionBadge } from "../components/Badge";
 import { Button, IconButton, LinkButton } from "../components/Button";
@@ -20,7 +20,7 @@ interface Group {
   items: LibraryItem[];
 }
 
-function Preview({ item, onClose, onToggleLibrary }: { item: LibraryItem; onClose: () => void; onToggleLibrary: () => void }) {
+function Preview({ item, onClose, onToggleLibrary, onDelete }: { item: LibraryItem; onClose: () => void; onToggleLibrary: () => void; onDelete: () => void }) {
   return (
     <Modal
       open
@@ -30,6 +30,9 @@ function Preview({ item, onClose, onToggleLibrary }: { item: LibraryItem; onClos
       onClose={onClose}
       footer={
         <>
+          <Button variant="danger" icon={<Trash2 size={15} />} onClick={onDelete}>
+            Xóa video
+          </Button>
           <Button icon={item.inLibrary ? <BookmarkMinus size={15} /> : <BookmarkPlus size={15} />} onClick={onToggleLibrary}>
             {item.inLibrary ? "Bỏ khỏi Thư viện" : "Thêm vào Thư viện"}
           </Button>
@@ -77,7 +80,7 @@ export function LibraryPage() {
   const [libraryOnly, setLibraryOnly] = useLocalStorage<boolean>("bvs.library.only", false);
   const [groupBy, setGroupBy] = useLocalStorage<"batch" | "session">("bvs.library.group", "batch");
   const lib = useApi(() => api.library(libraryOnly).then((r) => r.items), [libraryOnly]);
-  useRealtimeRefetch((ev) => ev.type === "local.library" || (ev.type === "job.status" && ev.to === "completed"), () => void lib.reload(), 800);
+  useRealtimeRefetch((ev) => ev.type === "local.library" || ev.type === "asset.deleted" || ev.type === "batch.deleted" || (ev.type === "job.status" && ev.to === "completed"), () => void lib.reload(), 800);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [preview, setPreview] = useState<LibraryItem | null>(null);
   const actions = useJobActions();
@@ -85,12 +88,13 @@ export function LibraryPage() {
   const groups = useMemo<Group[]>(() => {
     const map = new Map<string, Group>();
     for (const it of lib.data ?? []) {
-      const key = groupBy === "batch" ? (it.batchId ?? "none") : (it.sessionId ?? "none");
-      const title = groupBy === "batch" ? (it.batchName ?? "Không thuộc batch") : (it.sessionTitle ?? "Không thuộc phiên");
-      if (!map.has(key)) map.set(key, { key, title, batchId: groupBy === "batch" ? it.batchId : null, items: [] });
+      const merged = it.origin === "merge";
+      const key = merged ? "__merged" : groupBy === "batch" ? (it.batchId ?? "none") : (it.sessionId ?? "none");
+      const title = merged ? "Video đã ghép / đã dựng" : groupBy === "batch" ? (it.batchName ?? "Không thuộc batch") : (it.sessionTitle ?? "Không thuộc phiên");
+      if (!map.has(key)) map.set(key, { key, title, batchId: merged ? null : groupBy === "batch" ? it.batchId : null, items: [] });
       map.get(key)!.items.push(it);
     }
-    return [...map.values()];
+    return [...map.values()].sort((x, y) => (y.key === "__merged" ? 1 : 0) - (x.key === "__merged" ? 1 : 0));
   }, [lib.data, groupBy]);
 
   const toggle = (id: string, on: boolean) =>
@@ -104,6 +108,18 @@ export function LibraryPage() {
   const ids = [...selected];
   const setLib = async (assetIds: string[], inLibrary: boolean) => {
     await actions.addToLibrary(assetIds, inLibrary);
+    await lib.reload();
+  };
+
+  /** Xóa hẳn video khỏi máy - hook tự hỏi xác nhận */
+  const removeAssets = async (assetIds: string[], label?: string) => {
+    if (!(await actions.deleteAssets(assetIds, label))) return;
+    setSelected((s) => {
+      const n = new Set(s);
+      for (const id of assetIds) n.delete(id);
+      return n;
+    });
+    setPreview((p) => (p && assetIds.includes(p.id) ? null : p));
     await lib.reload();
   };
 
@@ -137,11 +153,23 @@ export function LibraryPage() {
               <Button size="sm" icon={<FileArchive size={14} />} loading={actions.busy === "zip"} onClick={() => void actions.downloadZip(ids, "thu-vien")}>
                 Tải ZIP
               </Button>
+              <Button size="sm" variant="primary" icon={<Film size={14} />} loading={actions.busy === "merge"} disabled={selected.size < 2} onClick={() => void actions.mergeVideos(ids).then(async (ok) => { if (ok) { setSelected(new Set()); await lib.reload(); } })}>
+                Ghép thành 1 video
+              </Button>
+              <Button size="sm" icon={<Film size={14} />} loading={actions.busy === "autoedit"} disabled={selected.size < 2} onClick={() => void actions.autoEdit(ids, window.prompt("Yêu cầu dựng cho AI (để trống = tự quyết):", "") || undefined).then(async (ok) => { if (ok) { setSelected(new Set()); await lib.reload(); } })}>
+                AI tự dựng
+              </Button>
+              <Button size="sm" variant="primary" icon={<Film size={14} />} disabled={selected.size < 2} onClick={() => void actions.proEdit(ids, window.prompt("Yêu cầu dựng nâng cao (tiêu đề, caption, phong cách...). Để trống = tự quyết:", "") || undefined).then((ok) => { if (ok) setSelected(new Set()); })}>
+                Dựng nâng cao (Claude Code)
+              </Button>
               <Button size="sm" icon={<BookmarkPlus size={14} />} onClick={() => void setLib(ids, true)}>
                 Thêm vào Thư viện
               </Button>
               <Button size="sm" icon={<BookmarkMinus size={14} />} onClick={() => void setLib(ids, false).then(() => setSelected(new Set()))}>
                 Bỏ khỏi Thư viện
+              </Button>
+              <Button size="sm" variant="danger" icon={<Trash2 size={14} />} loading={actions.busy === "delete"} onClick={() => void removeAssets(ids)}>
+                Xóa vĩnh viễn
               </Button>
               <IconButton label="Bỏ chọn" icon={<X size={14} />} onClick={() => setSelected(new Set())} />
             </>
@@ -195,6 +223,15 @@ export function LibraryPage() {
                     </LinkButton>
                   </div>
                 ) : null}
+                <Button
+                  size="sm"
+                  variant="danger"
+                  icon={<Trash2 size={14} />}
+                  loading={actions.busy === "delete"}
+                  onClick={() => void removeAssets(g.items.map((i) => i.id), `Toàn bộ ${g.items.length} video của "${g.title}"`)}
+                >
+                  Xóa nhóm
+                </Button>
               </div>
               <div className="lib-grid">
                 {g.items.map((it) => (
@@ -228,6 +265,7 @@ export function LibraryPage() {
             const next = !preview.inLibrary;
             void setLib([preview.id], next).then(() => setPreview({ ...preview, inLibrary: next }));
           }}
+          onDelete={() => void removeAssets([preview.id], preview.fileName)}
         />
       ) : null}
       {actions.dialog}

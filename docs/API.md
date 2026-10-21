@@ -32,10 +32,19 @@ Base: cùng origin với web (server phục vụ cả `/api/*` và `web/dist`). 
 - PATCH /api/providers/:id (cùng trường, apiKey chỉ khi đổi) ; DELETE /api/providers/:id (vô hiệu hóa)
 - POST /api/providers/:id/test → `{ ok, message }` (không tạo video)
 
+### muse2api (Muse qua cổng muse2api)
+`providerType: "muse2api"` — gọi service RIÊNG [muse2api](https://github.com/czg86389-hub/muse2api) (mặc định `http://127.0.0.1:18610`), service đó lái web muse.ai bằng Chromium/CDP. BVS chỉ nói HTTP với nó, không nhúng browser.
+- `endpoint` = địa chỉ muse2api, `apiKey` = `MUSE2API_KEY`. Dùng: `POST /v1/videos` → `GET /v1/videos/{id}` (poll, có progress thật) → tải `/v1/media/{file}` (không đòi Authorization).
+- `options.extraPrompt` nối thêm chỉ dẫn cố định vào mọi prompt; `options.videoTimeoutSec` đặt hạn chờ phía muse2api.
+- Năng lực: chỉ `muse-video`, 5/6/8/10 giây, chỉ `9:16` và `16:9`, 720p, không audio, không negative prompt, không seed, tối đa 1 ảnh (khung đầu).
+- **`pricing: "unknown"`** — không trả tiền theo request NHƯNG tiêu hạn mức tài khoản Muse, nên BVS vẫn buộc người dùng duyệt (`acknowledgeUnknownCost: true`) và trợ lý/agent KHÔNG được tự chạy.
+- `cancel: "none"` (không có API hủy), `idempotency: false` (không gửi lại cùng key → tránh tạo trùng, tiêu hạn mức 2 lần).
+- `POST /api/providers/:id/test` gọi `/v1/models` + `/readyz`: báo rõ khi pool chưa có tài khoản Muse. Không tạo video.
+
 ProviderConfig:
 ```
-{ id, providerType: "mock"|"seedance-byteplus", name, endpoint, authType, modelIds: string[], defaultModelId,
-  enabled, maxConcurrency, requestsPerMinute, options: { pricePerSecond?: {"480p":n,"720p":n,"1080p":n}, pricePerMillionTokens?, currency?, latencyMs?, pollIntervalMs?, watermark? },
+{ id, providerType: "mock"|"seedance-byteplus"|"muse2api", name, endpoint, authType, modelIds: string[], defaultModelId,
+  enabled, maxConcurrency, requestsPerMinute, options: { pricePerSecond?: {"480p":n,"720p":n,"1080p":n}, pricePerMillionTokens?, currency?, latencyMs?, pollIntervalMs?, watermark?, extraPrompt?, videoTimeoutSec? },
   hasApiKey, webhookEnabled, lastTest:{ok,message,at}|null, status:"active"|"disabled"|"needs_key",
   capabilities: { providerType, label, cancel:"none"|"queued_only"|"any", idempotency, progress, webhook, concurrencyHint, pricing:"free-mock"|"user-configured"|"unknown", docsUrl,
      models: [{ modelId, label, verified, modes:["text-to-video"|"image-to-video"|"reference-to-video"], durations:{min,max,auto}, aspectRatios:string[], resolutions:string[], defaultResolution, audio, negativePrompt, maxPromptChars, maxReferenceImages, qualityModes:string[], seed, notes:string[] }] },
@@ -59,6 +68,9 @@ ChatMessage: `{ id, role:"user"|"assistant"|"tool", content, toolCalls:[{id,name
 - POST /api/assets/library `{ assetIds, inLibrary?:boolean }` → `{ updated }`
 - POST /api/assets/zip `{ assetIds }` → file ZIP (dùng fetch + blob hoặc form POST)
 - POST /api/assets/:id/send-to-edit → `{ path }` hoặc 409 EDIT_INBOX_NOT_CONFIGURED
+- POST /api/assets/delete `{ assetIds }` → `{ deleted:string[], skipped:[{id,reason}], freedBytes }` - XÓA HẲN file trên đĩa (video + thumbnail + bản xem) và dòng DB; không hoàn tác. Asset đang được job CHƯA xong dùng làm tham chiếu bị bỏ qua (`skipped`). Job giữ nguyên prompt/chi phí, chỉ `outputAssetId` thành null.
+- DELETE /api/assets/:id → `{ deleted, freedBytes }` - như trên cho một asset; 409 ASSET_IN_USE nếu đang được job chưa xong dùng làm tham chiếu.
+- POST /api/assets/prune-orphans → `{ removedDirs, freedBytes }` - dọn thư mục `ast_*` còn trên đĩa mà không còn trong DB.
 
 Asset: `{ id, sessionId, kind, origin, fileName, mime, sizeBytes, sha256, durationSec, width, height, fps, videoCodec, hasAudio, inLibrary, sourceJobId, urls:{file,preview,thumbnail,download}, createdAt }`
 
@@ -97,6 +109,7 @@ BatchConfig: `{ mode:"text-to-video"|"image-to-video"|"reference-to-video", dura
 - GET /api/batches?sessionId= → `{ batches: Batch[] }` ; GET /api/batches/:id
 - POST /api/batches/:id/pause | /resume | /cancel-pending (→ `{cancelled}`) | /retry-failed `{confirm:true, approvedMaxCost?, acknowledgeUnknownCost?}` (→ `{retried, estimate, skipped}`; 409 CONFIRMATION_REQUIRED có details.estimate khi chưa confirm)
 - GET /api/batches/:id/events → `{ events: Event[] }` (mới nhất trước; cùng định dạng với SSE)
+- DELETE /api/batches/:id[?keepAssets=1] → `{ batchId, jobsDeleted, assetsDeleted, freedBytes }` - XÓA HẲN batch + job + lịch sử sự kiện, kèm video đã tạo (thêm `keepAssets=1` để giữ video lại trong Thư viện). Không hoàn tác. 409 BATCH_ACTIVE nếu còn job `submitting`/`processing` (hủy job đó trước).
 - GET /api/batches/:id/export?format=zip|csv|json|txt (tải file)
 
 Batch: `{ id, sessionId, name, mode, promptSetId, providerConfigId, providerName, providerType, modelId, config, maxConcurrency, status:"awaiting_approval"|"running"|"paused"|"completed"|"cancelled", budgetLimit, estimate, estimatedCost, actualCost, committedCost, currency, approvedAt, counts:{[status]:number}, total, progress, createdAt, updatedAt }`
@@ -119,5 +132,5 @@ Job: `{ id, batchId, sessionId, seq, title, prompt, negative, referenceAssetIds,
 - GET /api/library?libraryOnly=1 → `{ items: (Asset & { batchId, batchName, sessionTitle, version, prompt })[] }`
 
 ## Sự kiện realtime (SSE)
-- GET /api/events (EventSource, cookie) - event types: `job.status`, `job.progress`, `job.created`, `batch.created`, `batch.approved`, `batch.paused`, `batch.resumed`, `batch.status`, `analysis.status`, `analysis.progress`, `prompts.progress`, ... data (Event): `{ id, type, batchId, jobId, from, to, message, data, at }` - đúng định dạng của GET /api/jobs/:id/events và /api/batches/:id/events.
+- GET /api/events (EventSource, cookie) - event types: `job.status`, `job.progress`, `job.created`, `batch.created`, `batch.approved`, `batch.paused`, `batch.resumed`, `batch.status`, `analysis.status`, `analysis.progress`, `prompts.progress`, `asset.deleted`, `batch.deleted`, ... data (Event): `{ id, type, batchId, jobId, from, to, message, data, at }` - đúng định dạng của GET /api/jobs/:id/events và /api/batches/:id/events.
   Dùng để làm mới dữ liệu (refetch job/batch liên quan, debounce ~300ms). Video job nào xong là xem được ngay.

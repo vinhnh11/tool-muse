@@ -489,6 +489,41 @@ export interface CostConfirm {
   acknowledgeUnknownCost?: boolean;
 }
 
+export type DeploySelection = "auto" | "approved" | "all";
+
+export interface DeployBody {
+  sessionId?: string | null;
+  providerConfigId?: string;
+  modelId?: string;
+  config?: Partial<BatchConfig>;
+  selection?: DeploySelection;
+  useItemOverrides?: boolean;
+  defaultNegative?: string | null;
+  maxConcurrency?: number;
+  budgetLimit?: number | null;
+  name?: string;
+  dryRun?: boolean;
+  run?: { confirm: true; approvedMaxCost?: number | null; acknowledgeUnknownCost?: boolean };
+}
+
+export interface DeployResult {
+  dryRun: boolean;
+  promptSetId: string;
+  promptSetName: string;
+  selection: DeploySelection;
+  promptCount: number;
+  videoCount: number;
+  promptIndexes: number[];
+  providerConfigId: string;
+  modelId: string;
+  free: boolean;
+  check: BatchCheck;
+  estimate: BatchEstimate;
+  batch: Batch | null;
+  approved: boolean;
+  approveError: { code: string; message: string } | null;
+}
+
 export interface Job {
   id: string;
   batchId: string;
@@ -668,7 +703,13 @@ export const api = {
   assets: (q: { kind?: string; sessionId?: string | null; library?: boolean }) => get<{ assets: Asset[] }>(`/api/assets${qs({ kind: q.kind, sessionId: q.sessionId, library: q.library })}`),
   asset: (id: string) => get<Asset>(`/api/assets/${enc(id)}`),
   setLibrary: (assetIds: string[], inLibrary = true) => post<{ updated: number }>("/api/assets/library", { assetIds, inLibrary }),
+  deleteAssets: (assetIds: string[]) => post<{ deleted: string[]; skipped: { id: string; reason: string }[]; freedBytes: number }>("/api/assets/delete", { assetIds }),
+  pruneOrphans: () => post<{ removedDirs: number; freedBytes: number }>("/api/assets/prune-orphans"),
   sendToEdit: (id: string) => post<{ path: string }>(`/api/assets/${enc(id)}/send-to-edit`),
+  proEditAssets: (assetIds: string[], brief?: string) => post<{ id: string; status: string; message: string }>("/api/assets/pro-edit", { assetIds, brief }),
+  proEditStatus: (id: string) => get<{ id: string; status: "running" | "done" | "failed"; message: string; assetId: string | null; error: string | null }>(`/api/assets/pro-edit/${enc(id)}`),
+  autoEditAssets: (assetIds: string[], brief?: string) => post<{ asset: Asset; plan: { clips: { id: string }[]; transition: string } }>("/api/assets/auto-edit", { assetIds, brief }),
+  mergeAssets: (assetIds: string[], name?: string, sessionId?: string | null) => post<Asset>("/api/assets/merge", { assetIds, name, sessionId }),
   zip: async (assetIds: string[]): Promise<Blob> => (await rawFetch("POST", "/api/assets/zip", { assetIds })).blob(),
 
   // phân tích
@@ -682,8 +723,10 @@ export const api = {
   createPromptSet: (body: { name: string; sessionId?: string | null; items?: PromptInput[]; text?: string; fileName?: string }) => post<PromptSet>("/api/prompt-sets", body),
   generatePromptSet: (body: GenerateBody) => post<GenerateResult>("/api/prompt-sets/generate", body),
   promptSet: (id: string) => get<PromptSet>(`/api/prompt-sets/${enc(id)}`),
+  deployPromptSet: (id: string, body: DeployBody) => post<DeployResult>(`/api/prompt-sets/${enc(id)}/deploy`, body),
   addPromptItems: (id: string, items: PromptInput[]) => post<PromptSet>(`/api/prompt-sets/${enc(id)}/items`, { items }),
   setApproval: (id: string, itemIds: string[] | "all", approval: Approval) => post<{ updated: number }>(`/api/prompt-sets/${enc(id)}/approval`, { itemIds, approval }),
+  clearNegatives: (id: string) => post<{ cleared: number }>(`/api/prompt-sets/${enc(id)}/clear-negatives`, {}),
   updatePromptItem: (id: string, body: Partial<Pick<PromptItem, "title" | "objective" | "prompt" | "negative" | "durationSec" | "aspectRatio" | "approval">>) =>
     patch<PromptItem>(`/api/prompt-items/${enc(id)}`, body),
   deletePromptItem: (id: string) => del<{ ok: boolean }>(`/api/prompt-items/${enc(id)}`),
@@ -696,11 +739,13 @@ export const api = {
   batches: (sessionId?: string | null) => get<{ batches: Batch[] }>(`/api/batches${qs({ sessionId })}`),
   batch: (id: string) => get<Batch>(`/api/batches/${enc(id)}`),
   approveBatch: (id: string, body: CostConfirm) => post<Batch>(`/api/batches/${enc(id)}/approve`, body),
+  setBatchConcurrency: (id: string, maxConcurrency: number) => post<Batch>(`/api/batches/${enc(id)}/concurrency`, { maxConcurrency }),
   pauseBatch: (id: string) => post<Batch>(`/api/batches/${enc(id)}/pause`),
   resumeBatch: (id: string) => post<Batch>(`/api/batches/${enc(id)}/resume`),
   cancelPending: (id: string) => post<{ cancelled: number }>(`/api/batches/${enc(id)}/cancel-pending`),
   retryFailed: (id: string, body: Partial<CostConfirm>) => post<{ retried: string[]; estimate: number | null; skipped: { id: string; reason: string }[] }>(`/api/batches/${enc(id)}/retry-failed`, body),
   batchEvents: (id: string) => get<{ events: JobEventRow[] }>(`/api/batches/${enc(id)}/events`),
+  deleteBatch: (id: string, keepAssets = false) => del<{ batchId: string; jobsDeleted: number; assetsDeleted: number; freedBytes: number }>(`/api/batches/${enc(id)}${keepAssets ? "?keepAssets=1" : ""}`),
 
   // job
   jobs: (q: { batchId?: string; sessionId?: string; status?: string[]; q?: string; limit?: number; offset?: number }) =>

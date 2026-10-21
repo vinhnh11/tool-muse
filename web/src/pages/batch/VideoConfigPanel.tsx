@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, ExternalLink, ImagePlus, Info, Loader2, Settings2, X } from "lucide-react";
+import { AlertTriangle, ImagePlus, Loader2, Settings2, Trash2, X } from "lucide-react";
 import { api, asApiError, uploadAssets, type Asset } from "../../api";
 import { MockBadge, ProviderStatusBadge } from "../../components/Badge";
 import { Banner, ErrorBanner } from "../../components/EmptyState";
 import { Field, Input, Select, TextArea, Toggle } from "../../components/Field";
 import { Segmented } from "../../components/Tabs";
+import { useDialogs } from "../../components/ConfirmDialog";
 import { useToast } from "../../components/Toast";
 import { useApi } from "../../hooks/useApi";
 import { MODE_LABEL, QUALITY_LABEL } from "../../labels";
@@ -40,19 +41,51 @@ function NumberField({ value, min, max, onCommit, disabled, ariaLabel }: { value
   );
 }
 
-function ReferencePicker({ cfg }: { cfg: ResolvedConfig }) {
+export function ReferencePicker({ cfg }: { cfg: ResolvedConfig }) {
   const { sessionId } = useStudio();
   const toast = useToast();
+  const dialogs = useDialogs();
   const images = useApi(() => api.assets({ kind: "image", sessionId }).then((r) => r.assets), [sessionId]);
   const [uploading, setUploading] = useState<number | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const max = cfg.model?.maxReferenceImages ?? 0;
   const selected = cfg.state.referenceAssetIds;
+  const mode = cfg.state.mode;
+  const modes = cfg.model?.modes ?? [];
+  // Có ảnh -> tự chuyển sang ảnh→video; bỏ hết ảnh -> về văn bản→video
+  useEffect(() => {
+    if (selected.length > 0 && mode === "text-to-video" && modes.includes("image-to-video")) cfg.set({ mode: "image-to-video" });
+    else if (selected.length === 0 && mode === "image-to-video" && modes.includes("text-to-video")) cfg.set({ mode: "text-to-video" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected.length, mode, modes.join(",")]);
 
   const toggle = (a: Asset) => {
     if (selected.includes(a.id)) cfg.set({ referenceAssetIds: selected.filter((x) => x !== a.id) });
     else if (selected.length >= max) toast.error(`Model chỉ nhận tối đa ${max} ảnh tham chiếu.`);
     else cfg.set({ referenceAssetIds: [...selected, a.id] });
+  };
+
+  /** Xóa hẳn ảnh tham chiếu khỏi máy (hỏi xác nhận; bỏ khỏi lựa chọn hiện tại) */
+  const removeImage = async (a: Asset) => {
+    const ok = await dialogs.confirm({
+      title: "Xóa ảnh tham chiếu này?",
+      body: `${a.fileName} sẽ bị xóa khỏi máy, không hoàn tác được. Nếu có job chưa xong đang dùng ảnh này thì hệ thống sẽ từ chối xóa.`,
+      confirmLabel: "Xóa ảnh",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const r = await api.deleteAssets([a.id]);
+      if (r.skipped.length) {
+        toast.error("Không xóa được ảnh", r.skipped[0]!.reason);
+        return;
+      }
+      if (selected.includes(a.id)) cfg.set({ referenceAssetIds: selected.filter((x) => x !== a.id) });
+      await images.reload();
+      toast.success("Đã xóa ảnh");
+    } catch (e) {
+      toast.error("Không xóa được ảnh", asApiError(e).message);
+    }
   };
 
   const upload = async (files: FileList | null) => {
@@ -72,12 +105,12 @@ function ReferencePicker({ cfg }: { cfg: ResolvedConfig }) {
     }
   };
 
-  if (max === 0) return <Banner tone="warning">Model này không nhận ảnh tham chiếu.</Banner>;
+  if (max === 0) return <div className="muted small">Model này không nhận ảnh tham chiếu.</div>;
   return (
     <div className="ref-picker">
       <div className="ref-head">
         <span className="field-label">
-          Ảnh tham chiếu ({selected.length}/{max})
+          Ảnh sản phẩm tham chiếu ({selected.length}/{max})
         </span>
         <button type="button" className="btn btn-secondary btn-sm" onClick={() => input.current?.click()} disabled={uploading !== null}>
           {uploading !== null ? <Loader2 size={14} className="spin" /> : <ImagePlus size={14} />}
@@ -91,10 +124,15 @@ function ReferencePicker({ cfg }: { cfg: ResolvedConfig }) {
         {(images.data ?? []).map((a) => {
           const on = selected.includes(a.id);
           return (
-            <button key={a.id} type="button" className={`ref-item${on ? " is-on" : ""}`} onClick={() => toggle(a)} title={a.fileName} aria-pressed={on}>
-              <img src={a.urls.file} alt={a.fileName} loading="lazy" />
-              {on ? <span className="ref-check">{selected.indexOf(a.id) + 1}</span> : null}
-            </button>
+            <div key={a.id} className="ref-cell">
+              <button type="button" className={`ref-item${on ? " is-on" : ""}`} onClick={() => toggle(a)} title={a.fileName} aria-pressed={on}>
+                <img src={a.urls.file} alt={a.fileName} loading="lazy" />
+                {on ? <span className="ref-check">{selected.indexOf(a.id) + 1}</span> : null}
+              </button>
+              <button type="button" className="ref-del" aria-label={`Xóa ảnh ${a.fileName}`} title="Xóa ảnh này" onClick={() => void removeImage(a)}>
+                <Trash2 size={12} />
+              </button>
+            </div>
           );
         })}
       </div>
@@ -146,7 +184,7 @@ export function VideoConfigPanel({ cfg }: { cfg: ResolvedConfig }) {
         </Field>
       </div>
 
-      {provider ? (
+      {provider && (provider.status !== "active" || (model && !model.verified)) ? (
         <div className="config-badges">
           <ProviderStatusBadge status={provider.status} />
           {provider.providerType === "mock" ? <MockBadge /> : null}
@@ -173,13 +211,7 @@ export function VideoConfigPanel({ cfg }: { cfg: ResolvedConfig }) {
 
       {model ? (
         <>
-          {model.modes.length > 1 ? (
-            <Field label="Chế độ">
-              <Segmented ariaLabel="Chế độ tạo" value={state.mode} onChange={(v) => set({ mode: v })} options={model.modes.map((m) => ({ id: m, label: MODE_LABEL[m] ?? m }))} />
-            </Field>
-          ) : (
-            <div className="muted small">Chế độ: {MODE_LABEL[model.modes[0] ?? "text-to-video"]}</div>
-          )}
+          <div className="muted tiny">Chế độ: {MODE_LABEL[state.mode] ?? state.mode}{model.modes.length > 1 ? " (tự đổi theo việc có ảnh tham chiếu)" : ""}</div>
 
           {model.qualityModes.length ? (
             <Field label="Tốc độ / chất lượng">
@@ -188,7 +220,7 @@ export function VideoConfigPanel({ cfg }: { cfg: ResolvedConfig }) {
           ) : null}
 
           <div className="grid-2">
-            <Field label="Thời lượng (giây)" hint={`Model hỗ trợ ${model.durations.min}-${model.durations.max} giây${model.durations.auto ? " hoặc để model tự chọn" : ""}`}>
+            <Field label="Thời lượng (s)" hint={`${model.durations.min}-${model.durations.max}s · prompt ghi "dài N giây" thì theo prompt`}>
               <div className="duration-row">
                 <NumberField ariaLabel="Thời lượng" value={state.durationSec === -1 ? Math.min(model.durations.max, Math.max(model.durations.min, 8)) : state.durationSec} min={model.durations.min} max={model.durations.max} disabled={state.durationSec === -1} onCommit={(v) => set({ durationSec: v })} />
                 {model.durations.auto ? (
@@ -205,7 +237,7 @@ export function VideoConfigPanel({ cfg }: { cfg: ResolvedConfig }) {
             <Field label="Độ phân giải">
               <Select value={state.resolution} onChange={(e) => set({ resolution: e.target.value })} options={model.resolutions.map((r) => ({ value: r, label: r }))} />
             </Field>
-            <Field label="Số lần tạo mỗi prompt" hint="1-10 biến thể cho mỗi prompt">
+            <Field label="Số bản / prompt">
               <NumberField ariaLabel="Số lần tạo mỗi prompt" value={state.variantsPerPrompt} min={1} max={10} onCommit={(v) => set({ variantsPerPrompt: v })} />
             </Field>
           </div>
@@ -225,8 +257,8 @@ export function VideoConfigPanel({ cfg }: { cfg: ResolvedConfig }) {
             </Field>
           ) : null}
 
-          {cfg.needsReferences ? <ReferencePicker cfg={cfg} /> : null}
-
+          <details className="config-advanced">
+            <summary className="small">Nâng cao: luồng, ngân sách</summary>
           <div className="grid-2">
             <Field
               label="Số luồng tối đa"
@@ -244,26 +276,17 @@ export function VideoConfigPanel({ cfg }: { cfg: ResolvedConfig }) {
               <Input inputMode="decimal" value={state.budget} placeholder="vd: 25" onChange={(e) => set({ budget: e.target.value })} />
             </Field>
           </div>
+          </details>
 
           {model.notes.length ? (
-            <div className="model-notes">
-              <Info size={14} aria-hidden />
+            <details className="model-notes">
+              <summary className="small">Ghi chú về model ({model.notes.length})</summary>
               <ul>
                 {model.notes.map((n, i) => (
                   <li key={i}>{n}</li>
                 ))}
               </ul>
-            </div>
-          ) : null}
-          {provider?.capabilities.concurrencyHint ? (
-            <div className="muted small">
-              {provider.capabilities.concurrencyHint}{" "}
-              {provider.capabilities.docsUrl ? (
-                <a href={provider.capabilities.docsUrl} target="_blank" rel="noreferrer" className="link">
-                  Tài liệu <ExternalLink size={11} />
-                </a>
-              ) : null}
-            </div>
+            </details>
           ) : null}
         </>
       ) : (

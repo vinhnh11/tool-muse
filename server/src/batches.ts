@@ -2,7 +2,7 @@ import type { AppContext } from "./context.ts";
 import { audit, eventToPublic, recordEvent, type EventRow } from "./events.ts";
 import type { CostEstimate, GenerationInput, GenerationMode, ValidationIssue } from "./providers/types.ts";
 import { checkList, type ParsedLine, type PromptDraft } from "./prompts.ts";
-import { AppError, newId, nowIso, safeJsonParse } from "./util.ts";
+import { AppError, durationFromPrompt, newId, nowIso, safeJsonParse } from "./util.ts";
 
 export const JOB_STATUSES = ["draft", "awaiting_approval", "queued", "waiting_for_capacity", "submitting", "processing", "completed", "failed", "cancelled"] as const;
 export type JobStatus = (typeof JOB_STATUSES)[number];
@@ -309,6 +309,13 @@ export class BatchService {
     },
   ): { batch: BatchRow; check: BatchCheck; estimate: BatchEstimate } {
     const config = defaultBatchConfig(args.config);
+    // Thời lượng nghe theo prompt: prompt ghi "dài N giây" thì job đó dùng N (nếu model hỗ trợ), không thì theo cấu hình
+    {
+      const caps = this.ctx.providers.resolveById(workspaceId, args.providerConfigId).adapter.getCapabilities(this.ctx.providers.resolveById(workspaceId, args.providerConfigId).config).models.find((m) => m.modelId === args.modelId);
+      const lo = caps?.durations.min ?? 1;
+      const hi = caps?.durations.max ?? 600;
+      args.prompts = args.prompts.map((p) => (p.durationSec ? p : { ...p, durationSec: durationFromPrompt(p.prompt, lo, hi) ?? p.durationSec }));
+    }
     if (args.sessionId) this.assertSession(workspaceId, args.sessionId);
     if (!args.prompts.length) throw new AppError("NO_PROMPTS", "Chưa có prompt nào.", 400);
     if (args.prompts.length * config.variantsPerPrompt > 1000) throw new AppError("BATCH_TOO_LARGE", "Một batch tối đa 1000 video.", 400);
@@ -446,6 +453,15 @@ export class BatchService {
     });
   }
 
+  setMaxConcurrency(workspaceId: string, actor: Actor, batchId: string, n: number): BatchRow {
+    const b = this.getBatchRow(workspaceId, batchId);
+    const v = Math.max(1, Math.min(64, Math.round(Number(n))));
+    if (!Number.isFinite(v)) throw new AppError("INVALID_CONCURRENCY", "Số luồng không hợp lệ.", 400);
+    this.db.run("UPDATE video_batches SET max_concurrency = ?, updated_at = ? WHERE id = ? AND workspace_id = ?", v, nowIso(), batchId, workspaceId);
+    audit(this.ctx.db, { workspaceId, userId: actor.userId, actor: actor.kind, action: "batch.concurrency", targetType: "batch", targetId: batchId, data: { from: b.max_concurrency, to: v } });
+    return this.getBatchRow(workspaceId, batchId);
+  }
+
   setBatchStatus(workspaceId: string, actor: Actor, batchId: string, action: "pause" | "resume"): BatchRow {
     const b = this.getBatchRow(workspaceId, batchId);
     if (action === "pause") {
@@ -516,6 +532,44 @@ export class BatchService {
     });
     this.refreshBatch(batchId);
     return n;
+  }
+
+  /**
+   * XÓA HẲN batch: job + sự kiện + video đã tạo (asset) của batch.
+   * Chặn khi còn job đang gửi/đang chạy ở provider (phải hủy trước, nếu không
+   * worker sẽ tải kết quả về cho một batch không còn tồn tại).
+   * `keepAssets=true` chỉ xóa batch/job, video vẫn nằm trong Thư viện.
+   */
+  deleteBatch(workspaceId: string, actor: Actor, batchId: string, opts: { keepAssets?: boolean } = {}): { batchId: string; jobsDeleted: number; assetsDeleted: number; freedBytes: number } {
+    const b = this.getBatchRow(workspaceId, batchId);
+    const active = this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM video_batch_jobs WHERE batch_id = ? AND status IN ('submitting','processing')`, batchId);
+    if (Number(active?.n ?? 0) > 0) throw new AppError("BATCH_ACTIVE", `Batch còn ${active!.n} job đang chạy ở provider - hủy job đó trước khi xóa.`, 409);
+
+    const assetIds = opts.keepAssets
+      ? []
+      : this.db.all<{ id: string }>("SELECT a.id FROM video_assets a JOIN video_batch_jobs j ON j.id = a.source_job_id WHERE j.batch_id = ? AND a.workspace_id = ?", batchId, workspaceId).map((r) => r.id);
+
+    const del = assetIds.length ? this.ctx.storage.deleteAssets(workspaceId, assetIds, { skipInUse: true }) : { deleted: [], skipped: [], freedBytes: 0 };
+
+    let jobsDeleted = 0;
+    this.db.tx(() => {
+      this.db.run("DELETE FROM generation_versions WHERE job_id IN (SELECT id FROM video_batch_jobs WHERE batch_id = ?)", batchId);
+      jobsDeleted = this.db.run("DELETE FROM video_batch_jobs WHERE batch_id = ?", batchId).changes;
+      this.db.run("DELETE FROM video_batches WHERE id = ? AND workspace_id = ?", batchId, workspaceId);
+      this.db.run("DELETE FROM job_events WHERE batch_id = ?", batchId);
+      audit(this.db, {
+        workspaceId,
+        userId: actor.userId,
+        actor: actor.kind,
+        action: "batch.delete",
+        targetType: "batch",
+        targetId: batchId,
+        data: { name: b.name, jobs: jobsDeleted, assets: del.deleted.length, keepAssets: Boolean(opts.keepAssets), freedBytes: del.freedBytes },
+      });
+    });
+    // Sự kiện ghi SAU khi xóa (batch_id chỉ còn là nhãn) để web tự tải lại danh sách
+    recordEvent(this.db, { workspaceId, type: "batch.deleted", batchId, message: `Đã xóa batch "${b.name}" (${jobsDeleted} job, ${del.deleted.length} video).` });
+    return { batchId, jobsDeleted, assetsDeleted: del.deleted.length, freedBytes: del.freedBytes };
   }
 
   /**

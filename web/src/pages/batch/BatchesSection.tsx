@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Ban, Download, FolderKanban, Pause, Play, PlayCircle, RefreshCw, RotateCcw } from "lucide-react";
+import { Ban, Download, FolderKanban, Pause, Play, PlayCircle, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 import { api, exportUrls, JOB_STATUSES, PENDING_JOB_STATUSES, type Batch } from "../../api";
 import { BatchStatusBadge, MockBadge } from "../../components/Badge";
 import { Button, LinkButton } from "../../components/Button";
@@ -15,7 +15,7 @@ import { useStudio } from "../../state/studio";
 import { JobsManager } from "./JobsManager";
 import { useJobActions } from "./useJobActions";
 
-function BatchHeader({ batch, reload }: { batch: Batch; reload: () => void }) {
+function BatchHeader({ batch, reload, onDeleted }: { batch: Batch; reload: () => void; onDeleted: () => void }) {
   const { openApproval } = useStudio();
   const toast = useToast();
   const dialogs = useDialogs();
@@ -101,6 +101,25 @@ function BatchHeader({ batch, reload }: { batch: Batch; reload: () => void }) {
               Tạo lại job lỗi ({failed})
             </Button>
           ) : null}
+          {(batch.counts.completed ?? 0) > 0 ? (
+            <Button
+              icon={<Trash2 size={15} />}
+              loading={actions.busy === "delete"}
+              title="Xóa batch nhưng giữ video trong Thư viện"
+              onClick={() => void actions.deleteBatch(batch, true).then((ok) => ok && onDeleted())}
+            >
+              Xóa batch (giữ video)
+            </Button>
+          ) : null}
+          <Button
+            variant="danger"
+            icon={<Trash2 size={15} />}
+            loading={actions.busy === "delete"}
+            title="Xóa batch, job và mọi video đã tạo"
+            onClick={() => void actions.deleteBatch(batch, false).then((ok) => ok && onDeleted())}
+          >
+            Xóa batch + video
+          </Button>
         </div>
       </div>
 
@@ -142,7 +161,17 @@ function BatchHeader({ batch, reload }: { batch: Batch; reload: () => void }) {
             </span>
           ) : null}
           <span>
-            Luồng: <strong>{batch.estimate?.effectiveConcurrency ?? batch.maxConcurrency}</strong>
+            Luồng:{" "}
+            <select
+              aria-label="Số luồng của batch"
+              value={String(batch.maxConcurrency)}
+              disabled={busy !== null}
+              onChange={(e) => void act("conc", () => api.setBatchConcurrency(batch.id, Number(e.target.value)), `Đã đổi sang ${e.target.value} luồng`)}
+            >
+              {[...new Set([1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 30, batch.maxConcurrency])].sort((a, b) => a - b).map((n) => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
             {batch.estimate && batch.estimate.effectiveConcurrency < batch.maxConcurrency ? <span className="muted"> (chọn {batch.maxConcurrency}, provider giới hạn)</span> : null}
           </span>
         </div>
@@ -255,7 +284,14 @@ export function BatchesSection() {
       {selected.error && selected.error.status !== 404 ? <ErrorBanner error={selected.error} onRetry={selected.reload} /> : null}
       {selected.data ? (
         <div className="batch-detail">
-          <BatchHeader batch={selected.data} reload={() => void selected.reload()} />
+          <BatchHeader
+            batch={selected.data}
+            reload={() => void selected.reload()}
+            onDeleted={() => {
+              setSelectedBatchId(null);
+              void list.reload();
+            }}
+          />
           <JobsManager batch={selected.data} />
         </div>
       ) : null}

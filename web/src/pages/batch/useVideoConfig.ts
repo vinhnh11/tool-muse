@@ -38,7 +38,7 @@ const DEFAULT: VideoConfigState = {
   maxAttempts: 3,
 };
 
-export const CONCURRENCY_OPTIONS = [1, 2, 4, 8, 16];
+export const CONCURRENCY_OPTIONS = [1, 2, 3, 4, 5, 6, 8, 10, 16, 20, 30];
 
 export interface ResolvedConfig {
   state: VideoConfigState;
@@ -72,7 +72,7 @@ function normalize(s: VideoConfigState, providers: ProviderConfig[]): VideoConfi
   const audio = model.audio ? s.audio : false;
   const referenceAssetIds = s.referenceAssetIds.slice(0, Math.max(0, model.maxReferenceImages));
   const variantsPerPrompt = Math.min(10, Math.max(1, Math.round(s.variantsPerPrompt) || 1));
-  const maxConcurrency = CONCURRENCY_OPTIONS.includes(s.maxConcurrency) ? s.maxConcurrency : 2;
+  const maxConcurrency = CONCURRENCY_OPTIONS.includes(s.maxConcurrency) ? s.maxConcurrency : Math.min(provider.maxConcurrency, 30) || 2;
   return { ...s, providerId: provider.id, modelId: model.modelId, mode, quality, durationSec, aspectRatio, resolution, audio, referenceAssetIds, variantsPerPrompt, maxConcurrency };
 }
 

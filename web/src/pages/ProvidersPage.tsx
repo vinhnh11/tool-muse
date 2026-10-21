@@ -9,10 +9,9 @@ import { Field, Input, Select, Toggle } from "../components/Field";
 import { Modal } from "../components/Modal";
 import { toastApiError, useToast } from "../components/Toast";
 import { useApi } from "../hooks/useApi";
-import { CANCEL_LABEL, MODE_LABEL, PRICING_LABEL, QUALITY_LABEL, fmtDate } from "../labels";
+import { CANCEL_LABEL, MODE_LABEL, QUALITY_LABEL, fmtDate } from "../labels";
 import { useStudio } from "../state/studio";
 
-const RESOLUTIONS = ["480p", "720p", "1080p"];
 
 function numOrUndef(s: string): number | undefined {
   const t = s.trim().replace(",", ".");
@@ -36,14 +35,19 @@ function ProviderForm({ provider, types, onClose, onSaved }: { provider: Provide
   const [clearKey, setClearKey] = useState(false);
   const [webhook, setWebhook] = useState(provider?.webhookEnabled ?? false);
   const [enabled, setEnabled] = useState(provider?.enabled ?? true);
-  const pps = provider?.options.pricePerSecond ?? {};
-  const [prices, setPrices] = useState<Record<string, string>>(Object.fromEntries(RESOLUTIONS.map((r) => [r, pps[r] !== undefined ? String(pps[r]) : ""])));
-  const [perMTok, setPerMTok] = useState(provider?.options.pricePerMillionTokens !== undefined ? String(provider.options.pricePerMillionTokens) : "");
-  const [currency, setCurrency] = useState(String(provider?.options.currency ?? "USD"));
+  // Tuỳ chọn riêng của muse2api
+  const [extraPrompt, setExtraPrompt] = useState(String(provider?.options.extraPrompt ?? ""));
+  const [reqTimeout, setReqTimeout] = useState(provider?.options.requestTimeoutMs !== undefined ? String(provider.options.requestTimeoutMs) : "");
+  const [videoTimeout, setVideoTimeout] = useState(provider?.options.videoTimeoutSec !== undefined ? String(provider.options.videoTimeoutSec) : "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const authNone = (meta?.authType ?? provider?.authType) === "none";
   const isMock = type === "mock";
+  const isMuse = type === "muse2api";
+  // Không nhập đơn giá trong giao diện nữa (người dùng yêu cầu bỏ): chi phí luôn "không xác định",
+  // mỗi lần duyệt batch phải xác nhận chấp nhận. Đơn giá cũ trong options vẫn được GIỮ nguyên khi lưu.
+  // muse2api không có webhook (app.py không gửi callback).
+  const hasWebhook = !isMock && !isMuse;
   const modelList = useMemo(
     () =>
       models
@@ -70,16 +74,16 @@ function ProviderForm({ provider, types, onClose, onSaved }: { provider: Provide
     setBusy(true);
     setError(null);
     try {
-      const pricePerSecond: Record<string, number> = {};
-      for (const r of RESOLUTIONS) {
-        const n = numOrUndef(prices[r] ?? "");
-        if (n !== undefined) pricePerSecond[r] = n;
-      }
+      // Giữ nguyên mọi option sẵn có (gồm đơn giá cũ nếu từng nhập qua API) - giao diện không sửa giá nữa
       const options = {
         ...(provider?.options ?? {}),
-        pricePerSecond: Object.keys(pricePerSecond).length ? pricePerSecond : undefined,
-        pricePerMillionTokens: numOrUndef(perMTok),
-        currency: currency.trim() || "USD",
+        ...(isMuse
+          ? {
+              extraPrompt: extraPrompt.trim() || undefined,
+              requestTimeoutMs: numOrUndef(reqTimeout),
+              videoTimeoutSec: numOrUndef(videoTimeout),
+            }
+          : {}),
       };
       const body: ProviderInput = {
         name: name.trim() || undefined,
@@ -132,8 +136,19 @@ function ProviderForm({ provider, types, onClose, onSaved }: { provider: Provide
         </Field>
       </div>
       {isMock ? <MockBadge /> : null}
+      {isMuse ? (
+        <div className="banner banner-neutral">
+          <strong>muse2api là một service RIÊNG</strong> bạn tự dựng (
+          <a href="https://github.com/czg86389-hub/muse2api" target="_blank" rel="noreferrer">
+            github.com/czg86389-hub/muse2api
+          </a>
+          ) — nó lái web muse.ai bằng Chromium. Ứng dụng này chỉ cần <em>địa chỉ</em> + <em>API key</em> của service đó.
+          <br />
+          Việc thêm tài khoản Muse và lấy cookie làm ở <strong>trang quản trị của muse2api</strong> (<code>/admin</code>), không làm ở đây. Mỗi video TIÊU HẠN MỨC tài khoản Muse, không tính tiền theo request.
+        </div>
+      ) : null}
       {!isMock ? (
-        <Field label="Endpoint" hint="Địa chỉ API của provider">
+        <Field label="Endpoint" hint={isMuse ? "Địa chỉ service muse2api, vd http://127.0.0.1:18610" : "Địa chỉ API của provider"}>
           <Input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} className="mono" />
         </Field>
       ) : null}
@@ -189,30 +204,29 @@ function ProviderForm({ provider, types, onClose, onSaved }: { provider: Provide
         </div>
       ) : null}
 
-      {!isMock ? <Toggle checked={webhook} onChange={setWebhook} label="Nhận webhook từ provider" description="Chỉ là tín hiệu để kiểm tra lại sớm hơn; cần PUBLIC_BASE_URL trên máy chủ. Không bật vẫn chạy bình thường (poll định kỳ)." /> : null}
+      {hasWebhook ? <Toggle checked={webhook} onChange={setWebhook} label="Nhận webhook từ provider" description="Chỉ là tín hiệu để kiểm tra lại sớm hơn; cần PUBLIC_BASE_URL trên máy chủ. Không bật vẫn chạy bình thường (poll định kỳ)." /> : null}
       {editing ? <Toggle checked={enabled} onChange={setEnabled} label="Đang bật" /> : null}
 
-      {!isMock ? (
+      {isMuse ? (
         <fieldset className="fieldset">
-          <legend>Đơn giá (tùy chọn)</legend>
+          <legend>Tuỳ chọn muse2api</legend>
           <p className="muted small">
-            Ứng dụng <strong>không tự đoán giá</strong>. Chỉ khi bạn nhập đơn giá theo hợp đồng/bảng giá của mình, hệ thống mới ước tính chi phí và kiểm soát ngân sách. Để trống = chi phí “không xác định” và mỗi lần chạy phải xác nhận chấp nhận.
+            Mỗi video <strong>tiêu hạn mức tài khoản Muse</strong>, nên mỗi lần chạy bạn vẫn phải xác nhận. Hạn mức còn lại xem ở trang quản trị muse2api.
           </p>
-          <div className="grid-4">
-            {RESOLUTIONS.map((r) => (
-              <Field key={r} label={`Giá/giây ${r}`}>
-                <Input inputMode="decimal" value={prices[r] ?? ""} onChange={(e) => setPrices((p) => ({ ...p, [r]: e.target.value }))} placeholder="vd 0.05" />
-              </Field>
-            ))}
-            <Field label="Giá/1 triệu token">
-              <Input inputMode="decimal" value={perMTok} onChange={(e) => setPerMTok(e.target.value)} />
+          <Field label="Chỉ dẫn thêm vào mọi prompt (tuỳ chọn)" hint="Nối vào cuối mỗi prompt gửi sang Muse, vd: phong cách điện ảnh, ánh sáng mềm">
+            <Input value={extraPrompt} onChange={(e) => setExtraPrompt(e.target.value)} placeholder="để trống nếu không cần" />
+          </Field>
+          <div className="grid-2">
+            <Field label="Hạn chờ mỗi request (ms)" hint="Để trống = 60000. muse2api chạy browser thật nên có thể chậm.">
+              <Input type="number" min={1000} value={reqTimeout} onChange={(e) => setReqTimeout(e.target.value)} placeholder="60000" />
+            </Field>
+            <Field label="Hạn tạo video phía muse2api (giây)" hint="Gửi kèm field timeout để muse2api tự bỏ job treo. Để trống = dùng mặc định của nó (600).">
+              <Input type="number" min={30} value={videoTimeout} onChange={(e) => setVideoTimeout(e.target.value)} placeholder="600" />
             </Field>
           </div>
-          <Field label="Tiền tệ" className="w-160">
-            <Input value={currency} onChange={(e) => setCurrency(e.target.value.toUpperCase())} maxLength={6} />
-          </Field>
         </fieldset>
       ) : null}
+
       <ErrorBanner error={error} />
     </Modal>
   );
@@ -223,10 +237,6 @@ function ProviderCard({ p, onEdit, onChanged }: { p: ProviderConfig; onEdit: () 
   const dialogs = useDialogs();
   const [busy, setBusy] = useState<string | null>(null);
   const caps = p.capabilities;
-  const pps = p.options.pricePerSecond ?? {};
-  const priceText = Object.entries(pps)
-    .map(([r, v]) => `${r}: ${v}`)
-    .join(" · ");
 
   const test = async () => {
     setBusy("test");
@@ -312,11 +322,11 @@ function ProviderCard({ p, onEdit, onChanged }: { p: ProviderConfig; onEdit: () 
         <div>
           <span className="muted">Đồng thời</span> <strong>{p.maxConcurrency}</strong> luồng · <strong>{p.requestsPerMinute}</strong> yêu cầu/phút
         </div>
-        <div>
-          <span className="muted">Giá</span> {PRICING_LABEL[caps.pricing]}
-          {priceText ? ` (${priceText} ${String(p.options.currency ?? "USD")}/giây)` : ""}
-          {p.options.pricePerMillionTokens !== undefined ? ` · ${p.options.pricePerMillionTokens} ${String(p.options.currency ?? "USD")}/1M token` : ""}
-        </div>
+        {p.providerType === "muse2api" ? (
+          <div>
+            <span className="muted">Hạn mức</span> tiêu hạn mức tài khoản Muse (xem ở trang quản trị muse2api)
+          </div>
+        ) : null}
         <div>
           <span className="muted">Hủy job</span> {CANCEL_LABEL[caps.cancel] ?? caps.cancel} · {caps.progress ? "báo % tiến độ" : "không báo %"} · {caps.idempotency ? "chống gửi trùng" : "không chống gửi trùng"}
           {caps.webhook ? ` · webhook ${p.webhookEnabled ? "đang bật" : "tắt"}` : ""}
@@ -412,7 +422,7 @@ export function ProvidersPage() {
             </Button>
           </div>
         </div>
-        <p className="muted small">Provider là nơi thật sự tạo video (Seedance trên BytePlus ModelArk...). Thông số model hiển thị đúng như adapter khai báo; giao diện Batch Studio chỉ cho chọn những gì model hỗ trợ.</p>
+        <p className="muted small">Provider là nơi thật sự tạo video (Seedance trên BytePlus ModelArk, hoặc Muse qua service muse2api bạn tự dựng). Thông số model hiển thị đúng như adapter khai báo; giao diện Batch Studio chỉ cho chọn những gì model hỗ trợ.</p>
         {types.error ? <ErrorBanner error={types.error} onRetry={types.reload} /> : null}
         {providersError ? <ErrorBanner error={providersError} onRetry={reloadProviders} /> : null}
         {providersLoading ? <div className="skeleton" style={{ height: 200 }} /> : null}

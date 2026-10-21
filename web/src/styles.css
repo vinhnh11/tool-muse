@@ -179,6 +179,10 @@ p {
 .w-160 {
   max-width: 160px;
 }
+.w-full {
+  width: 100%;
+  max-width: none;
+}
 
 .spin {
   animation: spin 0.9s linear infinite;
@@ -2668,6 +2672,17 @@ input[type="number"]::-webkit-inner-spin-button {
   flex: 1 1 260px;
   min-width: 0;
 }
+.deploy-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: 8px;
+  margin: 2px 0;
+}
+@media (max-width: 560px) {
+  .deploy-picker {
+    grid-template-columns: 1fr;
+  }
+}
 .ack-box {
   display: flex;
   align-items: center;
@@ -3605,3 +3620,25 @@ input[type="number"]::-webkit-inner-spin-button {
     transition-duration: 0.01ms !important;
   }
 }
+
+
+/* ---- gọn cột cấu hình + ảnh tham chiếu ở khu nhập prompt ---- */
+.create-refs { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border, rgba(128,128,128,.3)); }
+.config-panel { gap: 8px; }
+.config-panel .grid-2 { gap: 8px; }
+.config-panel .field-hint, .config-panel .hint { font-size: 11px; }
+.config-advanced, .model-notes { border: 1px solid var(--border, rgba(128,128,128,.25)); border-radius: 8px; padding: 6px 10px; }
+.config-advanced > summary, .model-notes > summary { cursor: pointer; opacity: .8; }
+.config-advanced[open] > summary { margin-bottom: 8px; }
+.ref-grid { max-height: 140px; overflow: auto; }
+
+.ref-cell { position: relative; }
+.ref-cell .ref-item { width: 100%; }
+.ref-del {
+  position: absolute; bottom: 3px; right: 3px; width: 22px; height: 22px; border-radius: 50%;
+  border: 0; display: grid; place-items: center; cursor: pointer;
+  background: rgba(0,0,0,.65); color: #fff; opacity: 0; transition: opacity .15s;
+}
+.ref-cell:hover .ref-del, .ref-del:focus-visible { opacity: 1; }
+.ref-del:hover { background: #c0392b; }
+@media (hover: none) { .ref-del { opacity: 1; } }

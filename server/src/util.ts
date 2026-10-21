@@ -97,3 +97,13 @@ export function safeJsonParse<T>(text: string | null | undefined, fallback: T): 
     return fallback;
   }
 }
+
+/** Thời lượng ghi trong prompt ("dài 12 giây", "7-second", "duration: 9s"). Bỏ qua mốc kiểu "0-2s:" và số ngoài [min,max]. */
+export function durationFromPrompt(prompt: string, min = 3, max = 15): number | null {
+  const m =
+    prompt.match(/(?:dài|kéo dài|thời lượng|duration|length|long)\s*:?\s*(\d{1,2})\s*(?:giây|giay|s\b|sec|seconds)/i) ??
+    prompt.match(/(?<![\d-])(\d{1,2})[-\s]?(?:giây|giay|seconds?|sec)\b/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return n >= min && n <= max ? n : null;
+}

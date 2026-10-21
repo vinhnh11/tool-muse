@@ -1,3 +1,6 @@
+import { getProEdit, startProEdit } from "./proedit.ts";
+import { renderEdit } from "./autoedit.ts";
+import { mergeVideos } from "./merge.ts";
 import fs from "node:fs";
 import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -5,10 +8,11 @@ import Busboy from "busboy";
 import { ROOT_DIR } from "./config.ts";
 import type { AppContext } from "./context.ts";
 import * as auth from "./auth.ts";
-import { audit, eventToPublic, wake, type EventRow } from "./events.ts";
+import { audit, eventToPublic, recordEvent, wake, type EventRow } from "./events.ts";
 import { AnalysisService } from "./analysis.ts";
 import { BatchService, type Actor, type BatchConfig, type BatchPromptInput } from "./batches.ts";
 import { ChatService } from "./chat.ts";
+import { DeployService, type DeploySelection } from "./deploy.ts";
 import { ExportService } from "./exporter.ts";
 import { PromptService } from "./promptgen.ts";
 import { checkList, detectFormat, parsePrompts } from "./prompts.ts";
@@ -61,6 +65,7 @@ export function createApp(ctx: AppContext): express.Express {
   const sessions = new SessionService(ctx);
   const chat = new ChatService(ctx);
   const exporter = new ExportService(ctx);
+  const deployer = new DeployService(ctx);
 
   // ------------------------------------------------------------ không cần đăng nhập
 
@@ -319,7 +324,64 @@ export function createApp(ctx: AppContext): express.Express {
       return { updated: n };
     }),
   );
+  /** Ghép nhiều video (theo thứ tự assetIds) thành 1 video hoàn chỉnh */
+  app.post(
+    "/api/assets/merge",
+    h(async (req) => {
+      const ids: string[] = Array.isArray(req.body?.assetIds) ? req.body.assetIds.map(String) : [];
+      const row = await mergeVideos(ctx, { workspaceId: ws(req), userId: req.principal!.user.id, actor: actorOf(req).kind, sessionId: req.body?.sessionId ?? null, assetIds: ids, name: req.body?.name });
+      return ctx.storage.toPublic(row);
+    }),
+  );
+  /** AI (model chữ trong Cài đặt LLM) tự dựng: sắp thứ tự, cắt, chuyển cảnh, chèn chữ -> 1 video */
+  app.post(
+    "/api/assets/auto-edit",
+    h(async (req) => {
+      const ids: string[] = Array.isArray(req.body?.assetIds) ? req.body.assetIds.map(String) : [];
+      const r = await renderEdit(ctx, { workspaceId: ws(req), userId: req.principal!.user.id, actor: actorOf(req).kind, assetIds: ids, brief: req.body?.brief, name: req.body?.name });
+      return { asset: ctx.storage.toPublic(r.asset), plan: r.plan };
+    }),
+  );
+  /** Dựng nâng cao bằng Claude Code + skill HyperFrames (chạy nền, hỏi trạng thái bằng GET) */
+  app.post(
+    "/api/assets/pro-edit",
+    h((req) => {
+      const ids: string[] = Array.isArray(req.body?.assetIds) ? req.body.assetIds.map(String) : [];
+      return startProEdit(ctx, { workspaceId: ws(req), userId: req.principal!.user.id, actor: actorOf(req).kind, assetIds: ids, brief: req.body?.brief, name: req.body?.name });
+    }),
+  );
+  app.get("/api/assets/pro-edit/:id", h((req) => getProEdit(ws(req), String(req.params.id))));
   app.post("/api/assets/:id/send-to-edit", h((req) => exporter.sendToEdit(ws(req), String(req.params.id))));
+  /** Xóa HẲN nhiều video/ảnh (file + DB). Body: { assetIds: [...] } */
+  app.post(
+    "/api/assets/delete",
+    h((req) => {
+      const ids: string[] = Array.isArray(req.body?.assetIds) ? req.body.assetIds.map(String) : [];
+      if (!ids.length) throw new AppError("NO_ASSETS", "Chưa chọn video nào để xóa.", 400);
+      const r = ctx.storage.deleteAssets(ws(req), ids, { skipInUse: true });
+      audit(ctx.db, { workspaceId: ws(req), userId: req.principal!.user.id, actor: actorOf(req).kind, action: "asset.delete", targetType: "assets", targetId: r.deleted.join(","), data: { deleted: r.deleted.length, skipped: r.skipped.length, freedBytes: r.freedBytes } });
+      if (r.deleted.length) recordEvent(ctx.db, { workspaceId: ws(req), type: "asset.deleted", message: `Đã xóa ${r.deleted.length} video.` });
+      return { deleted: r.deleted, skipped: r.skipped, freedBytes: r.freedBytes };
+    }),
+  );
+  app.delete(
+    "/api/assets/:id",
+    h((req) => {
+      const r = ctx.storage.deleteAssets(ws(req), [String(req.params.id)]);
+      audit(ctx.db, { workspaceId: ws(req), userId: req.principal!.user.id, actor: actorOf(req).kind, action: "asset.delete", targetType: "asset", targetId: String(req.params.id), data: { freedBytes: r.freedBytes } });
+      recordEvent(ctx.db, { workspaceId: ws(req), type: "asset.deleted", message: "Đã xóa 1 video." });
+      return { deleted: r.deleted, freedBytes: r.freedBytes };
+    }),
+  );
+  /** Dọn thư mục asset mồ côi trên đĩa (không còn trong DB) */
+  app.post(
+    "/api/assets/prune-orphans",
+    h((req) => {
+      const r = ctx.storage.pruneOrphanDirs(ws(req));
+      audit(ctx.db, { workspaceId: ws(req), userId: req.principal!.user.id, actor: actorOf(req).kind, action: "asset.prune_orphans", data: r });
+      return r;
+    }),
+  );
   app.post(
     "/api/assets/zip",
     h(async (req, res) => {
@@ -405,8 +467,33 @@ export function createApp(ctx: AppContext): express.Express {
     }),
   );
   app.get("/api/prompt-sets/:id", h((req) => prompts.getSet(ws(req), String(req.params.id))));
+  /** Triển khai bộ prompt → batch (mỗi prompt = 1 video). dryRun=true chỉ kiểm + ước tính; run.confirm=true duyệt chạy luôn. */
+  app.post(
+    "/api/prompt-sets/:id/deploy",
+    h((req) => {
+      const b = req.body ?? {};
+      const sel = ["auto", "approved", "all"].includes(b.selection) ? (b.selection as DeploySelection) : "auto";
+      const run = b.run && typeof b.run === "object" ? { confirm: b.run.confirm === true, approvedMaxCost: num(b.run.approvedMaxCost) ?? null, acknowledgeUnknownCost: b.run.acknowledgeUnknownCost === true } : null;
+      return deployer.deploy(ws(req), actorOf(req), String(req.params.id), {
+        sessionId: b.sessionId === undefined ? undefined : (b.sessionId ?? null),
+        providerConfigId: b.providerConfigId ? String(b.providerConfigId) : null,
+        modelId: b.modelId ? String(b.modelId) : null,
+        config: b.config ?? {},
+        selection: sel,
+        useItemOverrides: b.useItemOverrides !== false,
+        defaultNegative: typeof b.defaultNegative === "string" ? b.defaultNegative : null,
+        maxConcurrency: num(b.maxConcurrency),
+        budgetLimit: num(b.budgetLimit) ?? null,
+        name: typeof b.name === "string" ? b.name : undefined,
+        dryRun: b.dryRun === true,
+        run,
+      });
+    }),
+  );
   app.post("/api/prompt-sets/:id/items", h((req) => prompts.addItems(ws(req), String(req.params.id), req.body?.items ?? [])));
   app.post("/api/prompt-sets/:id/approval", h((req) => ({ updated: prompts.setApproval(ws(req), String(req.params.id), req.body?.itemIds ?? "all", req.body?.approval ?? "approved") })));
+  // Dọn negative prompt cả bộ - cho model không nhận negative (vd Muse qua muse2api)
+  app.post("/api/prompt-sets/:id/clear-negatives", h((req) => ({ cleared: prompts.clearNegatives(ws(req), String(req.params.id)) })));
   app.get(
     "/api/prompt-sets/:id/export",
     h((req, res) => {
@@ -472,6 +559,7 @@ export function createApp(ctx: AppContext): express.Express {
       return batches.batchToPublic(batches.approveBatch(ws(req), actorOf(req), String(req.params.id), { confirm: b.confirm === true, approvedMaxCost: num(b.approvedMaxCost) ?? null, acknowledgeUnknownCost: b.acknowledgeUnknownCost === true }));
     }),
   );
+  app.post("/api/batches/:id/concurrency", h((req) => batches.batchToPublic(batches.setMaxConcurrency(ws(req), actorOf(req), String(req.params.id), Number(req.body?.maxConcurrency)))));
   app.post("/api/batches/:id/pause", h((req) => batches.batchToPublic(batches.setBatchStatus(ws(req), actorOf(req), String(req.params.id), "pause"))));
   app.post("/api/batches/:id/resume", h((req) => batches.batchToPublic(batches.setBatchStatus(ws(req), actorOf(req), String(req.params.id), "resume"))));
   app.post("/api/batches/:id/cancel-pending", h((req) => ({ cancelled: batches.cancelPending(ws(req), actorOf(req), String(req.params.id)) })));
@@ -480,6 +568,12 @@ export function createApp(ctx: AppContext): express.Express {
     h((req) => batches.retryJobs(ws(req), actorOf(req), { batchId: String(req.params.id), confirm: req.body?.confirm === true, approvedMaxCost: num(req.body?.approvedMaxCost) ?? null, acknowledgeUnknownCost: req.body?.acknowledgeUnknownCost === true })),
   );
   app.get("/api/batches/:id/events", h((req) => ({ events: batches.events(ws(req), { batchId: String(req.params.id), limit: 300 }) })));
+  /** Xóa HẲN batch (+ video của batch, trừ khi keepAssets=1) */
+  app.delete(
+    "/api/batches/:id",
+    h((req) => batches.deleteBatch(ws(req), actorOf(req), String(req.params.id), { keepAssets: req.query.keepAssets === "1" })),
+  );
+
   app.get(
     "/api/batches/:id/export",
     h(async (req, res) => {

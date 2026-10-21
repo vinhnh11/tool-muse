@@ -1,9 +1,14 @@
+import { getProEdit, startProEdit } from "./proedit.ts";
+import { renderEdit } from "./autoedit.ts";
+import { mergeVideos } from "./merge.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { z, type ZodTypeAny } from "zod";
 import type { AppContext } from "./context.ts";
 import { AnalysisService } from "./analysis.ts";
 import { BatchService, defaultBatchConfig, type Actor, type BatchConfig, type BatchPromptInput } from "./batches.ts";
+import { DeployService } from "./deploy.ts";
+import { audit } from "./events.ts";
 import { ExportService } from "./exporter.ts";
 import { PromptService } from "./promptgen.ts";
 import { detectFormat, parsePrompts } from "./prompts.ts";
@@ -154,7 +159,7 @@ export const TOOLS: ToolDef[] = [
     description: "AI sinh hàng loạt prompt video KHÁC NHAU từ các bản phân tích (đúng số lượng, tối ưu theo model). Tạo bộ prompt CHỜ DUYỆT - không tạo video, không tốn phí video.",
     schema: z.object({
       analysisIds: z.array(z.string()).default([]),
-      count: z.number().int().min(1).max(200),
+      count: z.number().int().min(1).max(10),
       durationSec: z.number().int(),
       aspectRatio: z.string(),
       providerConfigId: z.string().optional(),
@@ -183,6 +188,16 @@ export const TOOLS: ToolDef[] = [
       if (!parsed.items.length) throw new AppError("NO_PROMPTS", "Không đọc được prompt nào.", 400, parsed.errors);
       const set = new PromptService(ctx).createSet(c.workspaceId, actorOf(c), { sessionId: c.sessionId ?? null, name: a.name ?? a.fileName ?? "Prompt nhập", source: "import", items: parsed.items.map((i) => i.draft) });
       return { promptSetId: set.id, count: set.items.length, blankLines: parsed.blankLines, errors: parsed.errors, summary: `${parsed.items.length} dòng có nội dung (bỏ ${parsed.blankLines.length} dòng trống)` };
+    },
+  }),
+  def({
+    name: "video_clear_negatives",
+    alias: "video.clear_negatives",
+    description: "Xóa negative prompt của cả bộ prompt. Dùng khi model đích KHÔNG nhận negative (vd Muse qua muse2api) - prompt chính giữ nguyên, chỉ bỏ trống negative.",
+    schema: z.object({ promptSetId: z.string() }),
+    async handler(ctx, c, a) {
+      const cleared = new PromptService(ctx).clearNegatives(c.workspaceId, a.promptSetId);
+      return { promptSetId: a.promptSetId, cleared, summary: cleared ? `Đã dọn negative ${cleared} prompt` : "Bộ này không có negative nào cần dọn" };
     },
   }),
   def({
@@ -242,6 +257,58 @@ export const TOOLS: ToolDef[] = [
         return { needsUserApproval: true, batchId: b.id, estimate: b.estimated_cost, currency: b.currency, message: "Batch có thể tính phí: người dùng phải tự bấm 'Duyệt & chạy' trên giao diện. Trợ lý không được tự duyệt." };
       const r = svc.approveBatch(c.workspaceId, actorOf(c), a.batchId, { confirm: a.confirm, approvedMaxCost: a.approvedMaxCost, acknowledgeUnknownCost: a.acknowledgeUnknownCost });
       return { batchId: r.id, status: r.status };
+    },
+  }),
+  def({
+    name: "video_deploy_prompt_set",
+    alias: "video.deploy_prompt_set",
+    description:
+      "TRIỂN KHAI bộ prompt thành video khi người dùng nói 'triển khai' / 'làm video từ các prompt này': MỖI PROMPT = ĐÚNG 1 VIDEO (N prompt → N video, không nhân bản). Mặc định lấy prompt đã duyệt nếu có, không thì mọi prompt chưa bị loại (selection). Provider/model mặc định = cái đã dùng khi sinh bộ prompt. Provider MIỄN PHÍ (Mock) → chạy luôn. Provider TÍNH PHÍ → tạo batch CHỜ DUYỆT + trả ước tính; chỉ truyền confirm=true + approvedMaxCost (≥ ước tính) khi người dùng ĐÃ đồng ý rõ ràng con số chi phí. dryRun=true để xem trước số video + chi phí mà không tạo gì.",
+    schema: z.object({
+      promptSetId: z.string(),
+      selection: z.enum(["auto", "approved", "all"]).optional().describe("auto (mặc định) | approved = chỉ prompt đã duyệt | all = mọi prompt chưa bị loại"),
+      providerConfigId: z.string().optional(),
+      modelId: z.string().optional(),
+      config: batchConfigSchema.optional().describe("Thông số video; variantsPerPrompt luôn bị ép = 1"),
+      name: z.string().optional(),
+      maxConcurrency: z.number().int().min(1).max(64).optional(),
+      budgetLimit: z.number().nullable().optional(),
+      dryRun: z.boolean().optional(),
+      confirm: z.boolean().optional(),
+      approvedMaxCost: z.number().nullable().optional(),
+      acknowledgeUnknownCost: z.boolean().optional(),
+    }),
+    async handler(ctx, c, a) {
+      // Kênh chat trong app không được tự duyệt việc tính phí → chỉ tự chạy khi provider miễn phí
+      const run = c.channel !== "chat" && a.confirm ? { confirm: true, approvedMaxCost: a.approvedMaxCost ?? null, acknowledgeUnknownCost: a.acknowledgeUnknownCost } : null;
+      const r = new DeployService(ctx).deploy(c.workspaceId, actorOf(c), a.promptSetId, {
+        sessionId: c.sessionId ?? undefined,
+        providerConfigId: a.providerConfigId,
+        modelId: a.modelId,
+        config: (a.config ?? {}) as Partial<BatchConfig>,
+        selection: a.selection,
+        name: a.name,
+        maxConcurrency: a.maxConcurrency,
+        budgetLimit: a.budgetLimit ?? null,
+        dryRun: a.dryRun,
+        run,
+        autoRunIfFree: true,
+      });
+      const est = { total: r.estimate.total, currency: r.estimate.currency, kind: r.estimate.kind, effectiveConcurrency: r.estimate.effectiveConcurrency, notes: r.estimate.notes };
+      const head = { promptSetId: r.promptSetId, promptCount: r.promptCount, videoCount: r.videoCount, summary: `${r.promptCount} prompt → ${r.videoCount} video`, providerConfigId: r.providerConfigId, modelId: r.modelId, free: r.free, estimate: est };
+      if (r.dryRun)
+        return { ...head, dryRun: true, ok: r.check.ok, batchIssues: r.check.batchIssues, invalid: r.check.items.filter((i) => !i.valid).slice(0, 20).map((i) => ({ line: i.line, issues: i.issues.map((x) => x.message) })) };
+      const batchId = r.batch!.id;
+      if (r.approved) return { ...head, batchId, status: r.batch!.status === "awaiting_approval" ? "running" : r.batch!.status, approved: true, message: `Đã triển khai: ${r.videoCount} video đang chạy.` };
+      return {
+        ...head,
+        batchId,
+        status: "awaiting_approval",
+        approved: false,
+        approveError: r.approveError,
+        needsUserApproval: c.channel === "chat" ? true : undefined,
+        message: `Đã tạo batch CHỜ DUYỆT gồm ${r.videoCount} video (ước tính ${est.total ?? "không xác định"} ${est.currency}). Báo người dùng con số này; chỉ chạy khi họ đồng ý rõ ràng${c.channel === "chat" ? " - người dùng bấm 'Duyệt & chạy' trên giao diện" : " (gọi video_approve_batch với confirm=true + approvedMaxCost)"}.`,
+      };
     },
   }),
   def({
@@ -365,6 +432,85 @@ export const TOOLS: ToolDef[] = [
       const f = path.join(dir, t.fileName);
       fs.writeFileSync(f, t.body);
       return { file: f };
+    },
+  }),
+  def({
+    name: "video_pro_edit",
+    alias: "video.pro_edit",
+    description: "Dựng NÂNG CAO bằng Claude Code CLI + skill HyperFrames (tiêu đề động, caption, chuyển cảnh...). Chạy nền 5-10 phút: trả jobId ngay, rồi gọi video_pro_edit_status tới khi done. Dùng quota Claude của máy (không phải vinh1). Muốn nhanh/đơn giản dùng video_auto_edit.",
+    schema: z.object({ assetIds: z.array(z.string()).min(2), brief: z.string().optional(), name: z.string().optional() }),
+    async handler(ctx, c, a) {
+      const j = startProEdit(ctx, { workspaceId: c.workspaceId, userId: c.userId, actor: actorOf(c).kind, assetIds: a.assetIds, brief: a.brief, name: a.name, sessionId: c.sessionId ?? null });
+      return { jobId: j.id, status: j.status, message: j.message };
+    },
+  }),
+  def({
+    name: "video_pro_edit_status",
+    alias: "video.pro_edit_status",
+    description: "Trạng thái lượt dựng nâng cao (running/done/failed); done thì có assetId của video trong Thư viện.",
+    schema: z.object({ jobId: z.string() }),
+    async handler(ctx, c, a) {
+      return getProEdit(c.workspaceId, a.jobId);
+    },
+  }),
+  def({
+    name: "video_auto_edit",
+    alias: "video.auto_edit",
+    description: "AI tự dựng: model chữ (vinh1) xem mô tả các clip rồi lên kế hoạch - sắp thứ tự, cắt đầu/đuôi, chuyển cảnh, chèn caption - FFmpeg render thành 1 video hoàn chỉnh vào Thư viện. Không tốn quota provider. brief = yêu cầu về nhịp/nội dung/caption.",
+    schema: z.object({ assetIds: z.array(z.string()).min(2), brief: z.string().optional(), name: z.string().optional() }),
+    async handler(ctx, c, a) {
+      const r = await renderEdit(ctx, { workspaceId: c.workspaceId, userId: c.userId, actor: actorOf(c).kind, assetIds: a.assetIds, brief: a.brief, name: a.name, sessionId: c.sessionId ?? null });
+      return { assetId: r.asset.id, fileName: r.asset.file_name, durationSec: r.asset.duration_sec, plan: r.plan, message: `Đã dựng ${r.plan.clips.length} clip thành 1 video ${Math.round(r.asset.duration_sec ?? 0)}s.` };
+    },
+  }),
+  def({
+    name: "video_merge_videos",
+    alias: "video.merge_videos",
+    description: "Ghép nhiều video đã có (assetIds, theo đúng thứ tự) thành 1 video hoàn chỉnh bằng FFmpeg trên máy - không gọi provider, không tốn quota/tiền. Kết quả vào Thư viện. Khác khung hình thì tự co về khung của clip đầu.",
+    schema: z.object({ assetIds: z.array(z.string()).min(2), name: z.string().optional().describe("Tên file kết quả (không cần .mp4)") }),
+    async handler(ctx, c, a) {
+      const r = await mergeVideos(ctx, { workspaceId: c.workspaceId, userId: c.userId, actor: actorOf(c).kind, sessionId: c.sessionId ?? null, assetIds: a.assetIds, name: a.name });
+      return { assetId: r.id, fileName: r.file_name, durationSec: r.duration_sec, sizeMb: Math.round((r.size_bytes / 1048576) * 10) / 10, message: `Đã ghép ${a.assetIds.length} video thành 1 (${Math.round(r.duration_sec ?? 0)}s), đã thêm vào Thư viện.` };
+    },
+  }),
+  def({
+    name: "video_delete_videos",
+    alias: "video.delete_videos",
+    description:
+      "XÓA HẲN video đã tạo (file trên đĩa + dữ liệu) để dọn rác. Không khôi phục được. assetIds lấy từ video_list_assets/video_get_result (outputAssetId), hoặc batchId = xóa mọi video của batch đó. Bỏ qua video đang được job chưa xong dùng làm tham chiếu. confirm=true bắt buộc (không tốn phí, nhưng mất dữ liệu).",
+    schema: z.object({
+      assetIds: z.array(z.string()).optional().describe("Danh sách assetId cần xóa"),
+      batchId: z.string().optional().describe("Hoặc: xóa mọi video đã tạo của batch này (batch + job vẫn giữ)"),
+      confirm: z.boolean().describe("Phải true - xác nhận xóa vĩnh viễn"),
+    }),
+    async handler(ctx, c, a) {
+      if (!a.confirm) throw new AppError("CONFIRMATION_REQUIRED", "Xóa video là không thể hoàn tác - cần confirm=true sau khi người dùng đồng ý.", 409);
+      let ids = a.assetIds ?? [];
+      if (a.batchId) {
+        new BatchService(ctx).getBatchRow(c.workspaceId, a.batchId);
+        ids = [
+          ...ids,
+          ...ctx.db
+            .all<{ id: string }>("SELECT a.id FROM video_assets a JOIN video_batch_jobs j ON j.id = a.source_job_id WHERE j.batch_id = ? AND a.workspace_id = ?", a.batchId, c.workspaceId)
+            .map((r) => r.id),
+        ];
+      }
+      if (!ids.length) throw new AppError("NO_ASSETS", "Cần assetIds hoặc batchId có video.", 400);
+      const r = ctx.storage.deleteAssets(c.workspaceId, ids, { skipInUse: true });
+      audit(ctx.db, { workspaceId: c.workspaceId, userId: c.userId, actor: actorOf(c).kind, action: "asset.delete", targetType: "assets", targetId: r.deleted.join(","), data: { deleted: r.deleted.length, skipped: r.skipped.length, freedBytes: r.freedBytes } });
+      return { deleted: r.deleted.length, skipped: r.skipped, freedMb: Math.round((r.freedBytes / 1048576) * 10) / 10, message: `Đã xóa ${r.deleted.length} video${r.skipped.length ? `, bỏ qua ${r.skipped.length}` : ""}.` };
+    },
+  }),
+  def({
+    name: "video_delete_batch",
+    alias: "video.delete_batch",
+    description:
+      "XÓA HẲN một batch: batch + mọi job + lịch sử sự kiện, và cả video đã tạo của batch (keepAssets=true để giữ video lại trong Thư viện). Không khôi phục được; batch còn job đang chạy ở provider phải hủy trước. confirm=true bắt buộc.",
+    schema: z.object({ batchId: z.string(), keepAssets: z.boolean().optional(), confirm: z.boolean() }),
+    async handler(ctx, c, a) {
+      if (!a.confirm) throw new AppError("CONFIRMATION_REQUIRED", "Xóa batch là không thể hoàn tác - cần confirm=true sau khi người dùng đồng ý.", 409);
+      const r = new BatchService(ctx).deleteBatch(c.workspaceId, actorOf(c), a.batchId, { keepAssets: a.keepAssets });
+      return { ...r, freedMb: Math.round((r.freedBytes / 1048576) * 10) / 10, message: `Đã xóa batch: ${r.jobsDeleted} job, ${r.assetsDeleted} video.` };
     },
   }),
 ];

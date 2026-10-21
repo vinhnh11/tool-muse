@@ -161,6 +161,77 @@ export function useJobActions(currency = "USD") {
     }
   };
 
+  const mergeVideos = async (assetIds: string[], name?: string): Promise<boolean> => {
+    if (assetIds.length < 2) {
+      toast.info("Chọn ít nhất 2 video để ghép.");
+      return false;
+    }
+    setBusy("merge");
+    try {
+      const r = await api.mergeAssets(assetIds, name);
+      toast.success(`Đã ghép ${assetIds.length} video thành 1`, r.fileName);
+      return true;
+    } catch (e) {
+      toastApiError(toast, "Không ghép được video", e);
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const autoEdit = async (assetIds: string[], brief?: string): Promise<boolean> => {
+    if (assetIds.length < 2) {
+      toast.info("Chọn ít nhất 2 video để AI dựng.");
+      return false;
+    }
+    setBusy("autoedit");
+    try {
+      const r = await api.autoEditAssets(assetIds, brief);
+      toast.success(`AI đã dựng ${r.plan.clips.length} clip thành 1 video`, r.asset.fileName);
+      return true;
+    } catch (e) {
+      toastApiError(toast, "AI không dựng được video", e);
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Dựng nâng cao (Claude Code): chạy nền vài phút, hỏi trạng thái mỗi 10s rồi báo */
+  const proEdit = async (assetIds: string[], brief?: string): Promise<boolean> => {
+    if (assetIds.length < 2) {
+      toast.info("Chọn ít nhất 2 video để dựng.");
+      return false;
+    }
+    try {
+      const j = await api.proEditAssets(assetIds, brief);
+      toast.info("Claude Code đang dựng video", "Mất khoảng 5-10 phút, xong sẽ tự báo và thêm vào Thư viện.");
+      void (async () => {
+        for (let i = 0; i < 270; i++) {
+          await new Promise((r) => setTimeout(r, 10_000));
+          try {
+            const s = await api.proEditStatus(j.id);
+            if (s.status === "done") {
+              toast.success("Dựng nâng cao xong", s.message);
+              emitLocal({ type: "local.library" });
+              return;
+            }
+            if (s.status === "failed") {
+              toast.error("Dựng nâng cao thất bại", s.error ?? s.message);
+              return;
+            }
+          } catch {
+            /* BVS đang bận/khởi động lại: thử lại lần sau */
+          }
+        }
+      })();
+      return true;
+    } catch (e) {
+      toastApiError(toast, "Không bắt đầu được dựng nâng cao", e);
+      return false;
+    }
+  };
+
   const addToLibrary = async (assetIds: string[], inLibrary = true) => {
     if (!assetIds.length) return toast.info("Chưa chọn video nào đã hoàn thành.");
     try {
@@ -172,9 +243,66 @@ export function useJobActions(currency = "USD") {
     }
   };
 
+  /** Xóa HẲN video đã tạo (file + dữ liệu) - luôn hỏi lại, không hoàn tác được */
+  const deleteAssets = async (assetIds: string[], label?: string): Promise<boolean> => {
+    if (!assetIds.length) {
+      toast.info("Chưa chọn video nào.");
+      return false;
+    }
+    const ok = await dialogs.confirm({
+      title: assetIds.length === 1 ? "Xóa vĩnh viễn video này?" : `Xóa vĩnh viễn ${assetIds.length} video?`,
+      body: `${label ? `${label}. ` : ""}File video, ảnh thumbnail và dữ liệu liên quan bị xóa khỏi máy - KHÔNG hoàn tác được. Prompt và lịch sử chi phí của job vẫn được giữ.`,
+      confirmLabel: "Xóa vĩnh viễn",
+      danger: true,
+    });
+    if (!ok) return false;
+    setBusy("delete");
+    try {
+      const r = await api.deleteAssets(assetIds);
+      const mb = Math.round((r.freedBytes / 1048576) * 10) / 10;
+      toast.success(`Đã xóa ${r.deleted.length} video (giải phóng ${mb} MB)`, r.skipped.length ? `Bỏ qua ${r.skipped.length}: ${r.skipped[0]!.reason}` : undefined);
+      emitLocal({ type: "local.library" });
+      refresh(null);
+      return true;
+    } catch (e) {
+      toastApiError(toast, "Không xóa được video", e);
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Xóa HẲN batch (tùy chọn giữ lại video trong Thư viện) */
+  const deleteBatch = async (batch: Batch, keepAssets = false): Promise<boolean> => {
+    const done = (batch.counts.completed ?? 0) + (batch.counts.failed ?? 0) + (batch.counts.cancelled ?? 0);
+    const ok = await dialogs.confirm({
+      title: `Xóa batch "${batch.name}"?`,
+      body: keepAssets
+        ? `Xóa batch và ${batch.total} job (prompt, lịch sử). Video đã tạo được GIỮ LẠI trong Thư viện. Không hoàn tác được.`
+        : `Xóa batch, ${batch.total} job và toàn bộ video đã tạo (${batch.counts.completed ?? 0} video, trong tổng ${done} job đã kết thúc). File bị xóa khỏi máy - KHÔNG hoàn tác được.`,
+      confirmLabel: keepAssets ? "Xóa batch, giữ video" : "Xóa batch + video",
+      danger: true,
+    });
+    if (!ok) return false;
+    setBusy("delete");
+    try {
+      const r = await api.deleteBatch(batch.id, keepAssets);
+      const mb = Math.round((r.freedBytes / 1048576) * 10) / 10;
+      toast.success(`Đã xóa batch: ${r.jobsDeleted} job, ${r.assetsDeleted} video`, r.freedBytes ? `Giải phóng ${mb} MB` : undefined);
+      emitLocal({ type: "local.library" });
+      refresh(null);
+      return true;
+    } catch (e) {
+      toastApiError(toast, "Không xóa được batch", e);
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const dialog = req ? (
     <CostConfirmDialog open title={req.title} description={req.description} count={req.count} estimate={req.estimate} currency={req.currency} confirmLabel={req.confirmLabel} onConfirm={req.run} onClose={() => setReq(null)} />
   ) : null;
 
-  return { cancelJob, cancelJobs, retryJobs, retryFailed, approveJobs, downloadZip, addToLibrary, busy, dialog };
+  return { cancelJob, cancelJobs, retryJobs, retryFailed, approveJobs, downloadZip, mergeVideos, autoEdit, proEdit, addToLibrary, deleteAssets, deleteBatch, busy, dialog };
 }

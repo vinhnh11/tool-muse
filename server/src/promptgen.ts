@@ -225,6 +225,15 @@ export class PromptService {
     return itemToPublic(this.itemRow(workspaceId, itemId));
   }
 
+  /**
+   * Xóa negative prompt của cả bộ - dùng khi đổi sang model KHÔNG nhận negative
+   * (vd Muse qua muse2api). Trả về số dòng đã dọn.
+   */
+  clearNegatives(workspaceId: string, setId: string): number {
+    this.getSet(workspaceId, setId);
+    return this.ctx.db.run("UPDATE prompt_items SET negative = NULL, updated_at = ? WHERE set_id = ? AND negative IS NOT NULL AND trim(negative) <> ''", nowIso(), setId).changes;
+  }
+
   setApproval(workspaceId: string, setId: string, itemIds: string[] | "all", approval: "pending" | "approved" | "rejected"): number {
     this.getSet(workspaceId, setId);
     if (itemIds === "all") return this.ctx.db.run("UPDATE prompt_items SET approval = ?, updated_at = ? WHERE set_id = ?", approval, nowIso(), setId).changes;
@@ -284,7 +293,7 @@ export class PromptService {
 
   async generate(workspaceId: string, actor: Actor, args: GenerateArgs) {
     const count = Math.round(args.count);
-    if (!Number.isFinite(count) || count < 1 || count > 200) throw new AppError("INVALID_COUNT", "Số prompt phải từ 1 đến 200.", 400);
+    if (!Number.isFinite(count) || count < 1 || count > 10) throw new AppError("INVALID_COUNT", "AI chỉ sinh tối đa 10 prompt mỗi lần (prompt người dùng tự nhập/nhập file thì không giới hạn).", 400);
     const caps = this.modelCaps(workspaceId, args.providerConfigId, args.modelId);
     // Chặn sớm: model không làm được thời lượng/tỷ lệ yêu cầu
     if (args.durationSec !== -1 && (args.durationSec < caps.durations.min || args.durationSec > caps.durations.max))
@@ -346,14 +355,14 @@ export class PromptService {
       reference_assets: args.referenceAssetIds?.length ? `${args.referenceAssetIds.length} ảnh tham chiếu (sản phẩm/nhân vật) sẽ được gửi kèm cho model video - prompt phải nhắc giữ đúng ngoại hình chúng` : "",
     };
 
-    // 3. Sinh theo lô 10, chống trùng
+    // 3. Sinh theo lô 5, chống trùng
     const accepted: (z.infer<typeof itemSchema> & { slotInfo: (typeof slots)[number] })[] = [];
     const isDup = (p: string): boolean => accepted.some((a) => normalizeText(a.prompt) === normalizeText(p) || similarity(a.prompt, p) >= 0.8);
     let pending = [...slots];
-    for (let round = 0; round < 4 && pending.length; round++) {
+    for (let round = 0; round < 30 && pending.length; round++) {
       const nextPending: typeof slots = [];
-      for (let i = 0; i < pending.length; i += 10) {
-        const chunk = pending.slice(i, i + 10);
+      for (let i = 0; i < pending.length; i += 5) {
+        const chunk = pending.slice(i, i + 5);
         recordEvent(this.ctx.db, { workspaceId, type: "prompts.progress", message: `Đang viết prompt ${accepted.length + 1}-${Math.min(count, accepted.length + chunk.length)}/${count}` });
         const out = await this.ctx.llm.json(workspaceId, {
           model: textModel,
@@ -416,7 +425,7 @@ export class PromptService {
       message:
         accepted.length === count
           ? `Đã tạo đủ ${count} prompt khác nhau, chờ duyệt.`
-          : `Chỉ tạo được ${accepted.length}/${count} prompt không trùng sau 4 vòng - đã lưu phần có được, có thể bấm "AI viết thêm".`,
+          : `Chỉ tạo được ${accepted.length}/${count} prompt không trùng sau nhiều vòng - đã lưu phần có được, có thể bấm "AI viết thêm".`,
     };
   }
 

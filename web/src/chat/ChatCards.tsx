@@ -18,6 +18,7 @@ const TOOL_LABEL: Record<string, string> = {
   video_estimate_batch: "Ước tính batch",
   video_create_batch: "Tạo batch",
   video_approve_batch: "Duyệt batch",
+  video_deploy_prompt_set: "Triển khai bộ prompt",
   video_get_batch_status: "Trạng thái batch",
   video_pause_batch: "Tạm dừng batch",
   video_resume_batch: "Tiếp tục batch",

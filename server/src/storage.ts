@@ -143,7 +143,7 @@ export class Storage {
     tmpPath: string;
     fileName: string;
     kind: "reference" | "generated" | "image";
-    origin: "upload" | "provider";
+    origin: "upload" | "provider" | "merge";
     createdBy: string | null;
     sourceJobId?: string | null;
     sourceAttempt?: number | null;
@@ -278,4 +278,102 @@ export class Storage {
     for (const id of ids) n += this.db.run("UPDATE video_assets SET in_library = ? WHERE id = ? AND workspace_id = ?", value ? 1 : 0, id, workspaceId).changes;
     return n;
   }
+
+  /**
+   * XÓA HẲN asset: file trên đĩa (cả thumbnail/bản xem) + dòng DB.
+   * Phân tích của asset bị cascade theo FK; job/phiên bản chỉ mất liên kết output
+   * (giữ lịch sử prompt + chi phí để đối soát).
+   *
+   * Chặn xóa ảnh/video đang được job CHƯA xong dùng làm tham chiếu (tránh làm
+   * hỏng job đang chạy). Dọn đĩa trước-sai thì DB vẫn nhất quán: xóa DB trong
+   * transaction, chỉ rm file sau khi commit.
+   */
+  deleteAssets(workspaceId: string, ids: string[], opts: { skipInUse?: boolean } = {}): { deleted: string[]; skipped: { id: string; reason: string }[]; freedBytes: number } {
+    const deleted: string[] = [];
+    const skipped: { id: string; reason: string }[] = [];
+    let freedBytes = 0;
+    const dirs: string[] = [];
+
+    for (const id of [...new Set(ids)]) {
+      const row = this.db.get<AssetRow>("SELECT * FROM video_assets WHERE id = ? AND workspace_id = ?", id, workspaceId);
+      if (!row) {
+        if (opts.skipInUse) {
+          skipped.push({ id, reason: "Không tìm thấy asset." });
+          continue;
+        }
+        throw new AppError("NOT_FOUND", `Không tìm thấy asset ${id}.`, 404);
+      }
+      const inUse = this.db.get<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM video_batch_jobs
+         WHERE workspace_id = ? AND status NOT IN ('completed','failed','cancelled') AND (reference_asset_ids_json LIKE ? OR config_json LIKE ?)`,
+        workspaceId,
+        `%${row.id}%`,
+        `%${row.id}%`,
+      );
+      if (Number(inUse?.n ?? 0) > 0) {
+        const reason = "Đang được job chưa xong dùng làm ảnh/video tham chiếu.";
+        if (opts.skipInUse) {
+          skipped.push({ id, reason });
+          continue;
+        }
+        throw new AppError("ASSET_IN_USE", `Asset ${id}: ${reason}`, 409);
+      }
+      this.db.tx(() => {
+        this.db.run("UPDATE video_batch_jobs SET output_asset_id = NULL WHERE output_asset_id = ?", row.id);
+        this.db.run("UPDATE generation_versions SET asset_id = NULL WHERE asset_id = ?", row.id);
+        this.db.run("DELETE FROM video_assets WHERE id = ? AND workspace_id = ?", row.id, workspaceId);
+      });
+      deleted.push(row.id);
+      freedBytes += Number(row.size_bytes ?? 0);
+      // Mỗi asset có thư mục riêng (<ws>/<folder>/<assetId>) - xóa cả thumb + preview
+      dirs.push(path.dirname(this.abs(row.storage_path)));
+    }
+
+    for (const d of dirs) {
+      try {
+        if (path.basename(d).startsWith("ast_")) fs.rmSync(d, { recursive: true, force: true });
+      } catch {
+        // File đang bị trình phát giữ: DB đã sạch, lần dọn sau sẽ bỏ thư mục mồ côi
+      }
+    }
+    return { deleted, skipped, freedBytes };
+  }
+
+  /** Thư mục asset không còn dòng DB nào (do xóa lỗi dở, hoặc copy tay) */
+  pruneOrphanDirs(workspaceId: string): { removedDirs: number; freedBytes: number } {
+    const known = new Set(this.db.all<{ storage_path: string }>("SELECT storage_path FROM video_assets WHERE workspace_id = ?", workspaceId).map((r) => path.dirname(this.abs(r.storage_path))));
+    let removedDirs = 0;
+    let freedBytes = 0;
+    const wsRoot = this.abs(workspaceId);
+    if (!fs.existsSync(wsRoot)) return { removedDirs, freedBytes };
+    const walk = (dir: string): void => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (!e.isDirectory()) continue;
+        const full = path.join(dir, e.name);
+        if (e.name.startsWith("ast_")) {
+          if (known.has(full)) continue;
+          freedBytes += dirSize(full);
+          fs.rmSync(full, { recursive: true, force: true });
+          removedDirs++;
+        } else walk(full);
+      }
+    };
+    walk(wsRoot);
+    return { removedDirs, freedBytes };
+  }
+}
+
+function dirSize(dir: string): number {
+  let n = 0;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) n += dirSize(full);
+    else
+      try {
+        n += fs.statSync(full).size;
+      } catch {
+        /* file vừa biến mất */
+      }
+  }
+  return n;
 }

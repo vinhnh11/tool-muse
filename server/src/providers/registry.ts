@@ -2,6 +2,7 @@ import type { Db } from "../db.ts";
 import type { SecretBox } from "../secrets.ts";
 import { AppError, newId, nowIso, randomToken, safeJsonParse } from "../util.ts";
 import { MockProvider } from "./mock.ts";
+import { DEFAULT_MUSE2API_ENDPOINT, Muse2ApiProvider } from "./muse2api.ts";
 import { DEFAULT_BYTEPLUS_ENDPOINT, SeedanceBytePlusProvider } from "./seedance.ts";
 import type { ProviderCapabilities, ResolvedProviderConfig, VideoProvider } from "./types.ts";
 import type { MediaTools } from "../media.ts";
@@ -17,6 +18,15 @@ export const PROVIDER_TYPES = [
     authType: "bearer-api-key",
     defaultEndpoint: DEFAULT_BYTEPLUS_ENDPOINT,
     defaultModels: ["dreamina-seedance-2-5-260628", "dreamina-seedance-2-0-260128"],
+    defaultConcurrency: 2,
+    defaultRpm: 30,
+  },
+  {
+    type: "muse2api",
+    label: "Muse (qua muse2api)",
+    authType: "bearer-api-key",
+    defaultEndpoint: DEFAULT_MUSE2API_ENDPOINT,
+    defaultModels: ["muse-video"],
     defaultConcurrency: 2,
     defaultRpm: 30,
   },
@@ -85,6 +95,7 @@ export class ProviderRegistry {
     this.publicBaseUrl = opts.publicBaseUrl;
     this.register(new MockProvider(db, media));
     this.register(new SeedanceBytePlusProvider(opts.fetchImpl ?? fetch));
+    this.register(new Muse2ApiProvider(opts.fetchImpl ?? fetch));
   }
 
   register(p: VideoProvider): void {

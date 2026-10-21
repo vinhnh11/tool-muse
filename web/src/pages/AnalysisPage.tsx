@@ -12,6 +12,7 @@ import { useRealtimeRefetch } from "../hooks/useEvents";
 import { fmtBytes, fmtRelative, fmtSeconds } from "../labels";
 import { useStudio } from "../state/studio";
 import { AnalysisDetail } from "./AnalysisDetail";
+import { AI_PRESELECT_KEY } from "./batch/AiGenerateForm";
 
 interface UploadItem {
   key: string;
@@ -144,9 +145,13 @@ export function AnalysisPage() {
     }
   };
 
-  const openPromptGenerator = () => {
+  const completedIds = (analyses.data ?? []).filter((a) => a.status === "completed").map((a) => a.id);
+
+  /** Nối sang "Tạo prompt bằng AI" với các bản phân tích đã chọn sẵn → sinh prompt → (tùy chọn) triển khai thành video */
+  const openPromptGenerator = (analysisIds: string[]) => {
     try {
       localStorage.setItem("bvs.batch.tab", JSON.stringify("ai"));
+      localStorage.setItem(AI_PRESELECT_KEY, JSON.stringify(analysisIds));
     } catch {
       /* bỏ qua */
     }
@@ -228,6 +233,13 @@ export function AnalysisPage() {
             <div className="card-title">
               <ScanSearch size={16} aria-hidden /> Bản phân tích
             </div>
+            {completedIds.length > 1 ? (
+              <div className="card-head-actions">
+                <Button size="sm" variant="secondary" icon={<Sparkles size={14} />} onClick={() => openPromptGenerator(completedIds)} title="Sinh prompt từ mọi bản phân tích đã xong của phiên">
+                  Tạo prompt từ {completedIds.length} bản
+                </Button>
+              </div>
+            ) : null}
           </div>
           {analyses.error ? <ErrorBanner error={analyses.error} onRetry={analyses.reload} /> : null}
           {analyses.loading ? <div className="skeleton" style={{ height: 120 }} /> : null}
@@ -256,8 +268,8 @@ export function AnalysisPage() {
               asset={assetById.get(selected.assetId)}
               actions={
                 selected.status === "completed" ? (
-                  <Button size="sm" variant="primary" icon={<Sparkles size={14} />} onClick={openPromptGenerator}>
-                    Dùng để tạo prompt
+                  <Button size="sm" variant="primary" icon={<Sparkles size={14} />} onClick={() => openPromptGenerator([selected.id])}>
+                    Tạo prompt từ bản này
                   </Button>
                 ) : null
               }

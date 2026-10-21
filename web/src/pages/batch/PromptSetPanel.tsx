@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Ban, Check, CheckCheck, ChevronDown, ChevronUp, Copy, Download, ListChecks, Pencil, Trash2, Wand2, X } from "lucide-react";
+import { Ban, Check, CheckCheck, ChevronDown, ChevronUp, Copy, Download, ListChecks, Pencil, Rocket, Trash2, Wand2, X } from "lucide-react";
 import { api, asApiError, exportUrls, type ApiError, type Approval, type PromptItem, type PromptSet } from "../../api";
 import { ApprovalBadge, Badge } from "../../components/Badge";
 import { Button, IconButton, LinkButton } from "../../components/Button";
@@ -103,6 +103,7 @@ export function PromptSetPanel({
   setOnlyApproved,
   useItemOverrides,
   setUseItemOverrides,
+  onDeploy,
 }: {
   set: PromptSet | null;
   loading: boolean;
@@ -115,6 +116,8 @@ export function PromptSetPanel({
   setOnlyApproved: (v: boolean) => void;
   useItemOverrides: boolean;
   setUseItemOverrides: (v: boolean) => void;
+  /** Mở dialog TRIỂN KHAI: mỗi prompt = 1 video */
+  onDeploy: () => void;
 }) {
   const { sessionId, activeSetId, setActiveSetId } = useStudio();
   const toast = useToast();
@@ -142,6 +145,7 @@ export function PromptSetPanel({
     for (const i of set?.items ?? []) c[i.approval]++;
     return c;
   }, [set]);
+  const deployCount = onlyApproved ? counts.approved : counts.pending + counts.approved;
   const durationMismatch = useMemo(() => (set?.items ?? []).filter((i) => i.durationSec !== null && i.durationSec !== cfg.state.durationSec).length, [set, cfg.state.durationSec]);
 
   const run = async (id: string, fn: () => Promise<unknown>, okMsg?: string) => {
@@ -219,6 +223,16 @@ export function PromptSetPanel({
             <span className="muted small">
               {set.counts.total} prompt · {set.counts.approved} đã duyệt · {set.counts.rejected} đã loại
             </span>
+            <span className="spacer" />
+            <Button
+              variant="primary"
+              icon={<Rocket size={15} />}
+              disabled={!deployCount || !cfg.provider || !cfg.model}
+              title={!cfg.provider || !cfg.model ? "Chọn provider/model ở Cấu hình video trước" : `${deployCount} prompt → ${deployCount} video`}
+              onClick={onDeploy}
+            >
+              Triển khai {deployCount} video
+            </Button>
           </div>
           <div className="set-options">
             <Toggle checked={useSet} onChange={setUseSet} label="Dùng bộ prompt này để tạo batch" />
