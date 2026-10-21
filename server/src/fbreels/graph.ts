@@ -1,7 +1,26 @@
 import fs from "node:fs";
 import { redact, sleep as realSleep } from "../util.ts";
 
-export type GraphErrorKind = "token" | "rate_limit" | "permission" | "other";
+/** token/permission: lỗi xác thực-quyền (tạm dừng hàng đợi). rate_limit/network/server: tạm thời (được thử lại ở bước start/upload). */
+export type GraphErrorKind = "token" | "rate_limit" | "permission" | "network" | "server" | "other";
+
+/** Lỗi tạm thời, có thể thử lại an toàn trước bước finish */
+export const isTransientKind = (k: GraphErrorKind): boolean => k === "rate_limit" || k === "network" || k === "server";
+
+/** Lỗi cần người dùng can thiệp (token/quyền) */
+export const isAuthKind = (k: GraphErrorKind): boolean => k === "token" || k === "permission";
+
+/** Chỉ gửi token tới https + *.facebook.com / *.fbcdn.net */
+export function isTrustedUploadUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:") return false;
+    const h = u.hostname.toLowerCase();
+    return h.endsWith(".facebook.com") || h.endsWith(".fbcdn.net");
+  } catch {
+    return false;
+  }
+}
 
 export class GraphError extends Error {
   code: number | null;
@@ -55,7 +74,7 @@ export class GraphReelsClient {
     } catch (e) {
       const err = e as Error;
       const timeout = err.name === "TimeoutError" || err.name === "AbortError";
-      throw new GraphError(timeout ? "Facebook không trả lời kịp (hết thời gian chờ)." : `Không kết nối được Facebook: ${this.scrub(err.message)}`, "other");
+      throw new GraphError(timeout ? "Facebook không trả lời kịp (hết thời gian chờ)." : `Không kết nối được Facebook: ${this.scrub(err.message)}`, "network");
     }
     const text = await res.text();
     let json: Record<string, unknown> = {};
@@ -77,9 +96,12 @@ export class GraphReelsClient {
       } else if (code === 4 || code === 17 || code === 32 || code === 613 || res.status === 429) {
         kind = "rate_limit";
         msg = `Facebook giới hạn tần suất đăng (${code ?? 429}), thử lại sau. ${raw}`;
-      } else if (code === 10 || (code !== null && code >= 200 && code <= 299)) {
+      } else if (code === 10 || code === 492 || (code !== null && code >= 200 && code <= 299)) {
         kind = "permission";
         msg = `Token thiếu quyền đăng lên Page (${code}): ${raw}`;
+      } else if (code === 1 || code === 2 || res.status >= 500) {
+        kind = "server";
+        msg = `Facebook đang gặp sự cố tạm thời (${code ?? res.status}): ${raw}`;
       }
       throw new GraphError(this.scrub(msg), kind, res.status, code, subcode);
     }
@@ -105,6 +127,7 @@ export class GraphReelsClient {
 
   /** Bước 2: upload nguyên file (offset 0) lên rupload. Đọc cả file vào RAM (Reels ≤ 90s). */
   async uploadFile(uploadUrl: string, filePath: string): Promise<void> {
+    if (!isTrustedUploadUrl(uploadUrl)) throw new GraphError("Địa chỉ upload do Facebook trả về không hợp lệ (không phải https *.facebook.com / *.fbcdn.net); không gửi token.", "other");
     const buf = fs.readFileSync(filePath);
     await this.call(
       uploadUrl,
