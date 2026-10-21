@@ -1,9 +1,10 @@
 import type { AppContext } from "../context.ts";
 import { AppError, newId, nowIso } from "../util.ts";
-import { getReelsConfig } from "./config.ts";
+import { getReelsConfig, getReelsPause, type ReelsPause } from "./config.ts";
 import { checkReelEligibility } from "./eligibility.ts";
 
-export type ReelStatusCode = "pending_review" | "approved" | "publishing" | "published" | "failed" | "skipped" | "rejected";
+/** removed = người dùng đã xoá khỏi hàng (dòng giữ lại làm dấu để sweepMissing không xếp lại) */
+export type ReelStatusCode = "pending_review" | "approved" | "publishing" | "published" | "failed" | "skipped" | "rejected" | "removed";
 
 export const STATUS_LABEL: Record<ReelStatusCode, string> = {
   pending_review: "Chờ duyệt",
@@ -13,6 +14,7 @@ export const STATUS_LABEL: Record<ReelStatusCode, string> = {
   failed: "Lỗi",
   skipped: "Bỏ qua",
   rejected: "Đã từ chối",
+  removed: "Đã xoá khỏi hàng",
 };
 
 export interface ReelPostRow {
@@ -53,14 +55,14 @@ interface AssetInfo {
 const ASSET_COLS = "id, workspace_id, kind, file_name, mime, size_bytes, duration_sec, width, height, source_job_id, created_at";
 
 /**
- * Xếp video vừa xong vào hàng đăng. Idempotent (UNIQUE asset_id). Chưa cấu hình Facebook thì bỏ qua.
+ * Xếp video vừa xong vào hàng đăng. Idempotent (UNIQUE asset_id). Chưa cấu hình Facebook hoặc đang tắt tự động đăng thì bỏ qua.
  * Trả true nếu có dòng mới.
  */
 export function enqueueReel(ctx: AppContext, assetId: string): boolean {
   const a = ctx.db.get<AssetInfo>(`SELECT ${ASSET_COLS} FROM video_assets WHERE id = ?`, assetId);
   if (!a || a.kind !== "generated") return false;
   const cfg = getReelsConfig(ctx, a.workspace_id);
-  if (!cfg.tokenConfigured || !cfg.pageId) return false;
+  if (!cfg.autoEnabled || !cfg.tokenConfigured || !cfg.pageId) return false;
   const el = checkReelEligibility({ durationSec: a.duration_sec, width: a.width, height: a.height, mime: a.mime, fileName: a.file_name, sizeBytes: a.size_bytes });
   const now = nowIso();
   const status: ReelStatusCode = !el.ok ? "skipped" : cfg.requireApproval ? "pending_review" : "approved";
@@ -84,7 +86,7 @@ export function enqueueReel(ctx: AppContext, assetId: string): boolean {
 /** Quét video 'generated' đã xong nhưng chưa vào hàng (bị lỡ móc), chỉ video tạo sau mốc bật tính năng */
 export function sweepMissing(ctx: AppContext, ws: string): number {
   const cfg = getReelsConfig(ctx, ws);
-  if (!cfg.enabledSince || !cfg.tokenConfigured || !cfg.pageId) return 0;
+  if (!cfg.autoEnabled || !cfg.enabledSince || !cfg.tokenConfigured || !cfg.pageId) return 0;
   const rows = ctx.db.all<{ id: string }>(
     `SELECT a.id FROM video_assets a JOIN video_batch_jobs j ON j.id = a.source_job_id AND j.status = 'completed' AND j.output_asset_id = a.id
      WHERE a.workspace_id = ? AND a.kind = 'generated' AND a.created_at >= ?
@@ -120,14 +122,15 @@ export interface ReelItem {
   createdAt: string;
 }
 
-export function listQueue(ctx: AppContext, ws: string, status?: string): { items: ReelItem[] } {
+export function listQueue(ctx: AppContext, ws: string, status?: string): { items: ReelItem[]; pause: ReelsPause | null } {
   const rows = ctx.db.all<ReelPostRow & { file_name: string; duration_sec: number | null; width: number | null; height: number | null; thumbnail_path: string | null; title: string | null; prompt: string | null }>(
     `SELECT p.*, a.file_name, a.duration_sec, a.width, a.height, a.thumbnail_path, j.title, j.prompt
      FROM fb_reel_posts p JOIN video_assets a ON a.id = p.asset_id LEFT JOIN video_batch_jobs j ON j.id = p.job_id
-     WHERE p.workspace_id = ? ${status ? "AND p.status = ?" : ""} ORDER BY p.created_at DESC LIMIT 500`,
+     WHERE p.workspace_id = ? AND p.status <> 'removed' ${status ? "AND p.status = ?" : ""} ORDER BY p.created_at DESC LIMIT 500`,
     ...(status ? [ws, status] : [ws]),
   );
   return {
+    pause: getReelsPause(ctx, ws),
     items: rows.map((r) => ({
       id: r.id,
       assetId: r.asset_id,
@@ -154,7 +157,7 @@ export function listQueue(ctx: AppContext, ws: string, status?: string): { items
 
 function getPost(ctx: AppContext, ws: string, id: string): ReelPostRow {
   const r = ctx.db.get<ReelPostRow>("SELECT * FROM fb_reel_posts WHERE id = ? AND workspace_id = ?", id, ws);
-  if (!r) throw new AppError("NOT_FOUND", "Không tìm thấy mục trong hàng đăng.", 404);
+  if (!r || r.status === "removed") throw new AppError("NOT_FOUND", "Không tìm thấy mục trong hàng đăng.", 404);
   return r;
 }
 
@@ -187,10 +190,13 @@ export function retry(ctx: AppContext, ws: string, id: string, userId: string): 
     throw new AppError("NOT_ELIGIBLE", `Video không đủ điều kiện đăng Reels: ${el.reason}`, 409);
   }
   const now = nowIso();
+  // Video từng bị từ chối mà đang bắt buộc duyệt thì phải qua bước duyệt lại
+  const needReview = r.status === "rejected" && getReelsConfig(ctx, ws).requireApproval;
   const ch = ctx.db.run(
-    "UPDATE fb_reel_posts SET status = 'approved', skip_reason = NULL, error_message = NULL, fb_video_id = NULL, fb_post_id = NULL, step = NULL, approved_by = ?, approved_at = ?, updated_at = ? WHERE id = ? AND status = ?",
-    userId,
-    now,
+    "UPDATE fb_reel_posts SET status = ?, skip_reason = NULL, error_message = NULL, fb_video_id = NULL, fb_post_id = NULL, step = NULL, approved_by = ?, approved_at = ?, updated_at = ? WHERE id = ? AND status = ?",
+    needReview ? "pending_review" : "approved",
+    needReview ? null : userId,
+    needReview ? null : now,
     now,
     id,
     r.status,
@@ -198,9 +204,9 @@ export function retry(ctx: AppContext, ws: string, id: string, userId: string): 
   if (!ch) throw conflict("đăng lại", r);
 }
 
-/** Xoá khỏi hàng: chỉ xoá dòng hàng đợi, KHÔNG đụng video_assets/file */
+/** Xoá khỏi hàng: đánh dấu 'removed' (KHÔNG DELETE để sweepMissing không xếp lại → tránh đăng trùng). Không đụng video_assets/file */
 export function remove(ctx: AppContext, ws: string, id: string): void {
   const r = getPost(ctx, ws, id);
-  const ch = ctx.db.run("DELETE FROM fb_reel_posts WHERE id = ? AND status <> 'publishing'", id).changes;
+  const ch = ctx.db.run("UPDATE fb_reel_posts SET status = 'removed', updated_at = ? WHERE id = ? AND status NOT IN ('publishing', 'removed')", nowIso(), id).changes;
   if (!ch) throw conflict("xoá khỏi hàng", r);
 }

@@ -14,7 +14,7 @@ export interface ReelsConfig {
   captionTemplate: string;
   hashtags: string;
   aiCaption: boolean;
-  /** Mốc bật tự động lần đầu (ISO). Video tạo trước mốc này không bị đăng ngược. */
+  /** Mốc bật tự động gần nhất (ISO). Video tạo trước mốc này không bị đăng ngược. */
   enabledSince: string | null;
 }
 
@@ -99,7 +99,8 @@ export function saveReelsConfig(ctx: AppContext, ws: string, patch: unknown): Re
         last4 = null;
       }
     }
-    if (next.autoEnabled && !cur.autoEnabled && !next.enabledSince) next.enabledSince = nowIso();
+    // Mỗi lần bật lại tự động là một mốc mới: video làm xong lúc tắt không bị đăng dồn
+    if (next.autoEnabled && !cur.autoEnabled) next.enabledSince = nowIso();
     if (next.autoEnabled && (!next.pageId || !enc)) throw new AppError("INVALID_FB_CONFIG", "Cần nhập Page ID và Page access token trước khi bật tự động đăng.", 400);
     ctx.db.run(
       `INSERT INTO settings (workspace_id, key, value_json, secret_enc, updated_at) VALUES (?, ?, ?, ?, ?)
@@ -127,18 +128,50 @@ export function configuredWorkspaces(ctx: AppContext): string[] {
     .map((r) => r.workspace_id);
 }
 
-export function getLastPublishAt(ctx: AppContext, ws: string): number {
-  const r = ctx.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE workspace_id = ? AND key = ?", ws, STATE_KEY);
-  return Number(safeJsonParse<{ lastPublishAt?: number }>(r?.value_json, {}).lastPublishAt ?? 0);
+export interface ReelsPause {
+  kind: "token" | "permission";
+  message: string;
+  at: string;
 }
 
-export function setLastPublishAt(ctx: AppContext, ws: string, ms: number): void {
+interface ReelsState {
+  lastPublishAt?: number;
+  pause?: ReelsPause | null;
+}
+
+function readState(ctx: AppContext, ws: string): ReelsState {
+  const r = ctx.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE workspace_id = ? AND key = ?", ws, STATE_KEY);
+  return safeJsonParse<ReelsState>(r?.value_json, {});
+}
+
+function writeState(ctx: AppContext, ws: string, patch: ReelsState): void {
   ctx.db.run(
     `INSERT INTO settings (workspace_id, key, value_json, secret_enc, updated_at) VALUES (?, ?, ?, NULL, ?)
      ON CONFLICT(workspace_id, key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
     ws,
     STATE_KEY,
-    JSON.stringify({ lastPublishAt: ms }),
+    JSON.stringify({ ...readState(ctx, ws), ...patch }),
     nowIso(),
   );
+}
+
+export function getLastPublishAt(ctx: AppContext, ws: string): number {
+  return Number(readState(ctx, ws).lastPublishAt ?? 0);
+}
+
+/** Cờ tạm dừng hàng đợi (lỗi token/quyền) theo workspace */
+export function getReelsPause(ctx: AppContext, ws: string): ReelsPause | null {
+  return readState(ctx, ws).pause ?? null;
+}
+
+export function setReelsPause(ctx: AppContext, ws: string, pause: ReelsPause): void {
+  writeState(ctx, ws, { pause });
+}
+
+export function clearReelsPause(ctx: AppContext, ws: string): void {
+  writeState(ctx, ws, { pause: null });
+}
+
+export function setLastPublishAt(ctx: AppContext, ws: string, ms: number): void {
+  writeState(ctx, ws, { lastPublishAt: ms });
 }
