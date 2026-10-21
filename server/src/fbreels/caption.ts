@@ -7,7 +7,7 @@ export const CAPTION_MAX = 2200;
 
 /** Thay {prompt}, {tieu_de} trong mẫu. Hàm thuần. */
 export function renderTemplate(tpl: string, vars: { prompt: string; tieu_de: string }): string {
-  return (tpl || "{prompt}").replace(/\{prompt\}/g, vars.prompt).replace(/\{tieu_de\}/g, vars.tieu_de);
+  return (tpl || "{prompt}").replace(/\{prompt\}/g, () => vars.prompt).replace(/\{tieu_de\}/g, () => vars.tieu_de);
 }
 
 /** Chuẩn hóa chuỗi hashtag: mỗi từ có '#', bỏ trùng */
