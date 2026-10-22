@@ -23,7 +23,7 @@ import { nudgeJob } from "./scheduler.ts";
 import { AppError, redact, timingSafeEqualStr } from "./util.ts";
 import { clearPagePause, createPage, deletePage, getPage, getPageCredentials, getSharedSettings, listPages, saveSharedSettings, setAutoPageName, updatePage } from "./fbreels/config.ts";
 import { GraphReelsClient } from "./fbreels/graph.ts";
-import { approve as reelApprove, listQueue, reject as reelReject, remove as reelRemove, retry as reelRetry } from "./fbreels/queue.ts";
+import { approve as reelApprove, listQueue, reject as reelReject, remove as reelRemove, retry as reelRetry, retryComment as reelCommentRetry, setShopeeUrl as reelSetShopeeUrl } from "./fbreels/queue.ts";
 
 const COOKIE = "bvs_session";
 
@@ -284,6 +284,23 @@ export function createApp(ctx: AppContext): express.Express {
       reelRetry(ctx, ws(req), String(req.params.id), uid(req));
       fbAudit(req, "fb.reel.retry", String(req.params.id));
       return { ok: true };
+    }),
+  );
+  app.post(
+    "/api/facebook/reels/queue/:id/comment-retry",
+    h((req) => {
+      reelCommentRetry(ctx, ws(req), String(req.params.id));
+      fbAudit(req, "fb.reel.comment_retry", String(req.params.id));
+      return { ok: true };
+    }),
+  );
+  app.put(
+    "/api/facebook/reels/queue/:id/shopee-url",
+    h((req) => {
+      const raw = req.body?.shopeeUrl;
+      const item = reelSetShopeeUrl(ctx, ws(req), String(req.params.id), typeof raw === "string" ? raw : null);
+      fbAudit(req, "fb.reel.shopee_url", item.id, { hasLink: Boolean(item.shopeeUrl) });
+      return item;
     }),
   );
   app.delete(
@@ -626,6 +643,7 @@ export function createApp(ctx: AppContext): express.Express {
         maxConcurrency: num(b.maxConcurrency),
         budgetLimit: num(b.budgetLimit) ?? null,
         fbPage: typeof b.fbPage === "string" ? b.fbPage : null,
+        shopeeUrl: typeof b.shopeeUrl === "string" ? b.shopeeUrl : null,
       });
       return { batch: batches.batchToPublic(r.batch), check: r.check, estimate: r.estimate };
     }),

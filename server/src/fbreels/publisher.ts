@@ -20,6 +20,10 @@ export interface PublisherOptions {
 export const STALE_PUBLISHING_MS = 15 * 60_000;
 /** Thử lại lỗi tạm thời ở bước start/upload: tối đa 3 lần, giãn cách tăng dần */
 export const RETRY_DELAYS_MS = [2_000, 5_000, 15_000];
+/** Bình luận link Shopee: tối đa 3 lần cho lỗi tạm thời, chờ sau lần 1 và lần 2; lease chặn hai tick cùng bình luận */
+export const COMMENT_MAX_ATTEMPTS = 3;
+export const COMMENT_RETRY_DELAYS_MS = [3 * 60_000, 10 * 60_000];
+export const COMMENT_LEASE_MS = 5 * 60_000;
 
 const RESTART_MSG = "Máy chủ khởi động lại khi đang đăng; chưa gửi lệnh đăng cuối cùng. Kiểm tra Page rồi bấm Đăng lại.";
 
@@ -131,6 +135,74 @@ export class ReelsPublisher {
       const post = this.claim(pg.id);
       if (post) await this.publish(post);
     }
+    // Bình luận tách riêng khỏi đăng bài: lỗi ở đây không bao giờ đụng status của bài
+    try {
+      await this.commentPass();
+    } catch (e) {
+      this.log(`bình luận lỗi: ${redact((e as Error).message)}`);
+    }
+  }
+
+  /** Bình luận link Shopee cho các bài ĐÃ đăng, mỗi bài tối đa một bình luận thành công */
+  async commentPass(): Promise<void> {
+    const nowIsoStr = new Date(this.now()).toISOString();
+    const rows = this.ctx.db.all<ReelPostRow>(
+      "SELECT * FROM fb_reel_posts WHERE status = 'published' AND comment_status = 'pending' AND fb_comment_id IS NULL AND shopee_url IS NOT NULL AND fb_video_id IS NOT NULL AND (next_comment_at IS NULL OR next_comment_at <= ?) ORDER BY published_at LIMIT 5",
+      nowIsoStr,
+    );
+    for (const r of rows) {
+      try {
+        await this.commentOne(r);
+      } catch (e) {
+        this.log(`bình luận lỗi (${r.id}): ${redact((e as Error).message)}`);
+      }
+    }
+  }
+
+  private async commentOne(row: ReelPostRow): Promise<void> {
+    const db = this.ctx.db;
+    const nowMs = this.now();
+    // Lease nguyên tử: chỉ một tiến trình/tick giành được; crash giữa chừng thì hết lease mới thử lại
+    const got = db.run(
+      "UPDATE fb_reel_posts SET comment_attempts = comment_attempts + 1, next_comment_at = ?, updated_at = ? WHERE id = ? AND comment_status = 'pending' AND fb_comment_id IS NULL AND status = 'published' AND (next_comment_at IS NULL OR next_comment_at <= ?)",
+      new Date(nowMs + COMMENT_LEASE_MS).toISOString(),
+      nowIso(),
+      row.id,
+      new Date(nowMs).toISOString(),
+    ).changes;
+    if (!got) return;
+    const attempts = row.comment_attempts + 1;
+    const fail = (msg: string): void => {
+      const token = tokenForRedact(this.ctx, row.fb_page_id);
+      const clean = redact(msg, [token]).replace(/EAA[A-Za-z0-9]{6,}/g, "***").slice(0, 400);
+      db.run("UPDATE fb_reel_posts SET comment_status = 'failed', comment_error = ?, next_comment_at = NULL, updated_at = ? WHERE id = ? AND fb_comment_id IS NULL", clean, nowIso(), row.id);
+      this.log(`Bình luận lỗi (${row.id}): ${clean.slice(0, 120)}`);
+    };
+    let client: GraphReelsClient;
+    try {
+      client = this.client(row.fb_page_id);
+    } catch {
+      fail("Page đã bị xoá hoặc chưa có token nên không bình luận được.");
+      return;
+    }
+    try {
+      const { commentId } = await client.commentOnVideo(row.fb_video_id!, `🛒 Link sản phẩm: ${row.shopee_url}`);
+      db.run("UPDATE fb_reel_posts SET comment_status = 'done', fb_comment_id = ?, comment_error = NULL, next_comment_at = NULL, updated_at = ? WHERE id = ? AND fb_comment_id IS NULL", commentId, nowIso(), row.id);
+      this.log(`Đã bình luận link (${row.id})`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (e instanceof GraphError && (e.kind === "rate_limit" || e.kind === "server")) {
+        if (attempts < COMMENT_MAX_ATTEMPTS) {
+          db.run("UPDATE fb_reel_posts SET next_comment_at = ?, comment_error = ?, updated_at = ? WHERE id = ? AND fb_comment_id IS NULL", new Date(nowMs + COMMENT_RETRY_DELAYS_MS[attempts - 1]!).toISOString(), redact(msg).slice(0, 400), nowIso(), row.id);
+          return;
+        }
+        fail(`${msg} (đã thử ${COMMENT_MAX_ATTEMPTS} lần)`);
+      } else if (e instanceof GraphError && isAuthKind(e.kind)) {
+        fail(msg);
+      } else {
+        fail(`${msg} Có thể bình luận đã được đăng, kiểm tra trên Page trước khi bấm Thử bình luận lại.`);
+      }
+    }
   }
 
   private setStep(id: string, step: string, extra: { fb_video_id?: string } = {}): void {
@@ -178,7 +250,7 @@ export class ReelsPublisher {
       let caption = post.caption;
       if (!caption) {
         const job = post.job_id ? ctx.db.get<{ title: string; prompt: string }>("SELECT title, prompt FROM video_batch_jobs WHERE id = ?", post.job_id) : undefined;
-        caption = await buildCaption(ctx, { workspaceId: ws, prompt: job?.prompt ?? "", title: job?.title || asset.file_name }, cfg);
+        caption = await buildCaption(ctx, { workspaceId: ws, prompt: job?.prompt ?? "", title: job?.title || asset.file_name, shopeeUrl: post.shopee_url }, cfg);
         ctx.db.run("UPDATE fb_reel_posts SET caption = ?, updated_at = ? WHERE id = ?", caption, nowIso(), post.id);
       }
       const client = this.client(post.fb_page_id);

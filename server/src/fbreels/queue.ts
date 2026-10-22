@@ -1,5 +1,6 @@
 import type { AppContext } from "../context.ts";
 import { AppError, newId, nowIso } from "../util.ts";
+import { normalizeShopeeUrl } from "./shopee.ts";
 import { getPublishPage, pageName, parsePause, type ReelsPause } from "./config.ts";
 import { checkReelEligibility } from "./eligibility.ts";
 
@@ -17,6 +18,8 @@ export const STATUS_LABEL: Record<ReelStatusCode, string> = {
   removed: "Đã xoá khỏi hàng",
 };
 
+export type CommentStatus = "none" | "pending" | "done" | "failed";
+
 export interface ReelPostRow {
   id: string;
   workspace_id: string;
@@ -25,6 +28,13 @@ export interface ReelPostRow {
   /** id nội bộ fb_pages.id: Page đích của mục này, cố định từ lúc xếp hàng */
   fb_page_id: string | null;
   status: ReelStatusCode;
+  /** Link Shopee SAO CHÉP từ batch lúc xếp hàng, không JOIN lại batch */
+  shopee_url: string | null;
+  comment_status: CommentStatus;
+  comment_error: string | null;
+  fb_comment_id: string | null;
+  comment_attempts: number;
+  next_comment_at: string | null;
   caption: string | null;
   skip_reason: string | null;
   error_message: string | null;
@@ -57,11 +67,11 @@ interface AssetInfo {
 const ASSET_COLS = "id, workspace_id, kind, file_name, mime, size_bytes, duration_sec, width, height, source_job_id, created_at";
 
 /** Page đích của video: batch của job tạo ra video → video_batches.fb_page_id (NULL/'none' = không đăng) */
-function targetPageOf(ctx: AppContext, jobId: string | null): string | null {
-  if (!jobId) return null;
-  const r = ctx.db.get<{ fb_page_id: string | null }>("SELECT b.fb_page_id FROM video_batch_jobs j JOIN video_batches b ON b.id = j.batch_id WHERE j.id = ?", jobId);
+function targetOf(ctx: AppContext, jobId: string | null): { pageId: string | null; shopeeUrl: string | null } {
+  if (!jobId) return { pageId: null, shopeeUrl: null };
+  const r = ctx.db.get<{ fb_page_id: string | null; shopee_url: string | null }>("SELECT b.fb_page_id, b.shopee_url FROM video_batch_jobs j JOIN video_batches b ON b.id = j.batch_id WHERE j.id = ?", jobId);
   const v = r?.fb_page_id ?? null;
-  return v && v !== "none" ? v : null;
+  return v && v !== "none" ? { pageId: v, shopeeUrl: r?.shopee_url || null } : { pageId: null, shopeeUrl: null };
 }
 
 /**
@@ -72,7 +82,7 @@ function targetPageOf(ctx: AppContext, jobId: string | null): string | null {
 export function enqueueReel(ctx: AppContext, assetId: string): boolean {
   const a = ctx.db.get<AssetInfo>(`SELECT ${ASSET_COLS} FROM video_assets WHERE id = ?`, assetId);
   if (!a || a.kind !== "generated") return false;
-  const pageRowId = targetPageOf(ctx, a.source_job_id);
+  const { pageId: pageRowId, shopeeUrl } = targetOf(ctx, a.source_job_id);
   if (!pageRowId) return false;
   const page = getPublishPage(ctx, pageRowId);
   if (!page || page.workspace_id !== a.workspace_id || !page.auto_enabled) return false;
@@ -80,8 +90,8 @@ export function enqueueReel(ctx: AppContext, assetId: string): boolean {
   const now = nowIso();
   const status: ReelStatusCode = !el.ok ? "skipped" : page.require_approval ? "pending_review" : "approved";
   const r = ctx.db.run(
-    `INSERT OR IGNORE INTO fb_reel_posts (id, workspace_id, asset_id, job_id, fb_page_id, status, skip_reason, approved_by, approved_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO fb_reel_posts (id, workspace_id, asset_id, job_id, fb_page_id, status, skip_reason, approved_by, approved_at, shopee_url, comment_status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     newId("fbr"),
     a.workspace_id,
     a.id,
@@ -91,6 +101,8 @@ export function enqueueReel(ctx: AppContext, assetId: string): boolean {
     el.ok ? null : el.reason,
     status === "approved" ? "auto" : null,
     status === "approved" ? now : null,
+    shopeeUrl,
+    shopeeUrl && status !== "skipped" ? "pending" : "none",
     now,
     now,
   );
@@ -134,6 +146,11 @@ export interface ReelItem {
   errorMessage: string | null;
   caption: string | null;
   fbVideoId: string | null;
+  shopeeUrl: string | null;
+  commentStatus: CommentStatus;
+  commentError: string | null;
+  fbCommentId: string | null;
+  commentAttempts: number;
   attempts: number;
   approvedAt: string | null;
   publishedAt: string | null;
@@ -176,6 +193,11 @@ export function listQueue(ctx: AppContext, ws: string, f: { status?: string; pag
       errorMessage: r.error_message,
       caption: r.caption,
       fbVideoId: r.fb_video_id,
+      shopeeUrl: r.shopee_url,
+      commentStatus: r.comment_status,
+      commentError: r.comment_error,
+      fbCommentId: r.fb_comment_id,
+      commentAttempts: r.comment_attempts,
       attempts: r.attempts,
       approvedAt: r.approved_at,
       publishedAt: r.published_at,
@@ -224,11 +246,12 @@ export function retry(ctx: AppContext, ws: string, id: string, userId: string): 
   // Video từng bị từ chối mà đang bắt buộc duyệt thì phải qua bước duyệt lại
   const needReview = r.status === "rejected" && Boolean(page.require_approval);
   const ch = ctx.db.run(
-    "UPDATE fb_reel_posts SET status = ?, skip_reason = NULL, error_message = NULL, fb_video_id = NULL, fb_post_id = NULL, step = NULL, approved_by = ?, approved_at = ?, updated_at = ? WHERE id = ? AND status = ?",
+    "UPDATE fb_reel_posts SET status = ?, skip_reason = NULL, error_message = NULL, fb_video_id = NULL, fb_post_id = NULL, step = NULL, approved_by = ?, approved_at = ?, updated_at = ?, comment_status = ?, comment_error = NULL, comment_attempts = 0, next_comment_at = NULL WHERE id = ? AND status = ?",
     needReview ? "pending_review" : "approved",
     needReview ? null : userId,
     needReview ? null : now,
     now,
+    r.shopee_url ? "pending" : "none",
     id,
     r.status,
   ).changes;
@@ -240,4 +263,24 @@ export function remove(ctx: AppContext, ws: string, id: string): void {
   const r = getPost(ctx, ws, id);
   const ch = ctx.db.run("UPDATE fb_reel_posts SET status = 'removed', updated_at = ? WHERE id = ? AND status NOT IN ('publishing', 'removed')", nowIso(), id).changes;
   if (!ch) throw conflict("xoá khỏi hàng", r);
+}
+
+/** Sửa link Shopee của MỘT bài, chỉ khi đang chờ duyệt. Link rỗng = bỏ link. Caption dựng lại khi đăng. */
+export function setShopeeUrl(ctx: AppContext, ws: string, id: string, raw: unknown): ReelItem {
+  const r = getPost(ctx, ws, id);
+  const url = normalizeShopeeUrl(raw);
+  const ch = ctx.db.run("UPDATE fb_reel_posts SET shopee_url = ?, comment_status = ?, comment_error = NULL, comment_attempts = 0, next_comment_at = NULL, caption = NULL, updated_at = ? WHERE id = ? AND status = 'pending_review'", url, url ? "pending" : "none", nowIso(), id).changes;
+  if (!ch) throw conflict("sửa link Shopee", r);
+  return listQueue(ctx, ws).items.find((x) => x.id === id)!;
+}
+
+/** Xếp lại bình luận lỗi để publisher thử ở tick kế. Chỉ khi bài đã đăng, chưa có bình luận nào. */
+export function retryComment(ctx: AppContext, ws: string, id: string): void {
+  const r = getPost(ctx, ws, id);
+  const ch = ctx.db.run(
+    "UPDATE fb_reel_posts SET comment_status = 'pending', comment_error = NULL, comment_attempts = 0, next_comment_at = NULL, updated_at = ? WHERE id = ? AND status = 'published' AND comment_status = 'failed' AND fb_comment_id IS NULL AND shopee_url IS NOT NULL",
+    nowIso(),
+    id,
+  ).changes;
+  if (!ch) throw new AppError("INVALID_STATE", `Không thể thử bình luận lại: bài phải đã đăng, bình luận đang lỗi và chưa có bình luận nào (trạng thái hiện tại: "${STATUS_LABEL[r.status] ?? r.status}").`, 409);
 }

@@ -25,16 +25,33 @@ export function normalizeHashtags(raw: string): string[] {
   return out;
 }
 
-export function composeCaption(body: string, hashtags: string): string {
+export const SHOPEE_LINE_PREFIX = "🛒 Mua tại đây: ";
+
+/** Cắt tối đa n đơn vị UTF-16, không cắt đôi cặp surrogate của emoji */
+function safeSlice(s: string, n: number): string {
+  if (n <= 0) return "";
+  if (s.length <= n) return s;
+  let end = n;
+  const c = s.charCodeAt(end - 1);
+  if (c >= 0xd800 && c <= 0xdbff) end--;
+  return s.slice(0, end);
+}
+
+/** Link (nếu có) luôn nằm CUỐI caption, sau hashtag, và không bao giờ bị cắt: phần nội dung bị cắt trước */
+export function composeCaption(body: string, hashtags: string, shopeeUrl?: string | null): string {
   const tags = normalizeHashtags(hashtags).filter((t) => !body.toLowerCase().includes(t.toLowerCase()));
   const text = [body.trim(), tags.join(" ")].filter(Boolean).join("\n\n");
-  return text.slice(0, CAPTION_MAX);
+  if (!shopeeUrl) return text.slice(0, CAPTION_MAX);
+  const linkLine = SHOPEE_LINE_PREFIX + shopeeUrl;
+  return [safeSlice(text, CAPTION_MAX - (linkLine.length + 2)).trimEnd(), linkLine].filter(Boolean).join("\n\n");
 }
 
 export interface CaptionSource {
   workspaceId: string;
   prompt: string;
   title: string;
+  /** Link Shopee của bài: ghép bằng code SAU khi AI trả caption, không đưa cho AI */
+  shopeeUrl?: string | null;
 }
 
 const AI_SYSTEM = "Bạn viết caption ngắn (tối đa 2 câu, tiếng Việt, tự nhiên, có thể 1-2 emoji, KHÔNG hashtag) để đăng video Reels lên Facebook Page, dựa trên prompt tạo video. Trả JSON: {\"caption\": \"...\"}.";
@@ -55,5 +72,7 @@ export async function buildCaption(ctx: AppContext, src: CaptionSource, cfg: Ree
     }
   }
   if (!body) body = renderTemplate(cfg.captionTemplate, vars).trim();
-  return composeCaption(body, cfg.hashtags);
+  // AI có thể tự bịa link: khi bài có link Shopee thật thì bỏ mọi URL do AI/mẫu sinh ra
+  if (src.shopeeUrl) body = body.replace(/https?:\/\/\S+/gi, "").replace(/[ \t]+\n/g, "\n").trim();
+  return composeCaption(body, cfg.hashtags, src.shopeeUrl);
 }

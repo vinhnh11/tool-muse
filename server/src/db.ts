@@ -453,6 +453,20 @@ UPDATE video_batches SET fb_page_id = 'fbp_legacy_' || workspace_id
  WHERE fb_page_id IS NULL AND EXISTS (SELECT 1 FROM fb_pages p WHERE p.id = 'fbp_legacy_' || video_batches.workspace_id AND p.auto_enabled = 1);
 `,
   },
+  {
+    version: 4,
+    sql: `
+-- Gắn link Shopee: link của batch được SAO CHÉP sang từng bài lúc xếp hàng; bình luận có trạng thái riêng
+ALTER TABLE video_batches ADD COLUMN shopee_url TEXT;
+ALTER TABLE fb_reel_posts ADD COLUMN shopee_url TEXT;
+ALTER TABLE fb_reel_posts ADD COLUMN comment_status TEXT NOT NULL DEFAULT 'none';
+ALTER TABLE fb_reel_posts ADD COLUMN comment_error TEXT;
+ALTER TABLE fb_reel_posts ADD COLUMN fb_comment_id TEXT;
+ALTER TABLE fb_reel_posts ADD COLUMN comment_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE fb_reel_posts ADD COLUMN next_comment_at TEXT;
+CREATE INDEX idx_fbr_comment ON fb_reel_posts(comment_status, next_comment_at);
+`,
+  },
 ];
 
 export function migrate(db: Db, maxVersion = Infinity): void {

@@ -176,6 +176,26 @@ export class GraphReelsClient {
     }
   }
 
+  /** Bình luận dưới video/Reels: POST /{video-id}/comments (quyền pages_manage_engagement). Gọi ĐÚNG 1 lần, không tự thử lại. */
+  async commentOnVideo(videoId: string, message: string): Promise<{ commentId: string }> {
+    let j: Record<string, unknown>;
+    try {
+      j = await this.call(
+        `${this.base}/${videoId}/comments`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message, access_token: this.o.token }) },
+        API_TIMEOUT,
+      );
+    } catch (e) {
+      if (e instanceof GraphError && (e.kind === "permission" || (e.httpStatus === 403 && e.kind !== "token"))) {
+        throw new GraphError("Token Page thiếu quyền bình luận (cần pages_manage_engagement). Cấp lại token, xem docs/facebook-reels.md.", "permission", e.httpStatus, e.code, e.subcode);
+      }
+      throw e;
+    }
+    const id = j.id ? String(j.id) : "";
+    if (!id) throw new GraphError("Facebook không trả id bình luận.", "other");
+    return { commentId: id };
+  }
+
   /** Kiểm tra token + Page ID: GET /{page-id}?fields=name,id */
   async pageInfo(): Promise<{ id: string; name: string }> {
     const j = await this.call(`${this.base}/${this.o.pageId}?fields=name,id`, { method: "GET", headers: { Authorization: this.authHeader() } }, API_TIMEOUT);
