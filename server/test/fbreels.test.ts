@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createEnv, tmpDir, userClient, type TestEnv } from "./helpers.ts";
 import { checkReelEligibility } from "../src/fbreels/eligibility.ts";
-import { getReelsConfig, getReelsPause, saveReelsConfig } from "../src/fbreels/config.ts";
+import { createPage, getPage, getPagePause, updatePage } from "../src/fbreels/config.ts";
 import { GraphError, GraphReelsClient } from "../src/fbreels/graph.ts";
 import { composeCaption, renderTemplate } from "../src/fbreels/caption.ts";
 import { enqueueReel, listQueue, sweepMissing } from "../src/fbreels/queue.ts";
@@ -58,8 +58,24 @@ async function setup(name: string, fetchImpl?: typeof fetch) {
   return { env, c, ws: c.workspaceId };
 }
 
-function addAsset(env: TestEnv, ws: string, o: { dur?: number; w?: number; h?: number; mime?: string } = {}): string {
+/** Page đang dùng của mỗi workspace trong test (Page đầu tiên do configure() tạo) */
+const pageByWs = new Map<string, string>();
+const pageOf = (ws: string): string => pageByWs.get(ws)!;
+
+/** Video thuộc một batch+job chọn Page (mặc định Page của workspace; null nếu chưa có Page). o.page = id Page hoặc "none" */
+function addAsset(env: TestEnv, ws: string, o: { dur?: number; w?: number; h?: number; mime?: string; page?: string } = {}): string {
   const id = newId("ast");
+  const bid = newId("bat");
+  const jid = newId("job");
+  const nowIso = new Date().toISOString();
+  env.ctx.db.run(
+    "INSERT INTO video_batches (id, workspace_id, name, mode, provider_config_id, model_id, config_json, max_concurrency, status, fb_page_id, created_at, updated_at) VALUES (?, ?, 'b', 'single', 'p', 'm', '{}', 1, 'running', ?, ?, ?)",
+    bid, ws, o.page ?? pageByWs.get(ws) ?? null, nowIso, nowIso,
+  );
+  env.ctx.db.run(
+    "INSERT INTO video_batch_jobs (id, batch_id, workspace_id, seq, prompt, provider_config_id, model_id, config_json, status, lineage_id, created_at, updated_at) VALUES (?, ?, ?, 1, 'p', 'p', 'm', '{}', 'running', ?, ?, ?)",
+    jid, bid, ws, jid, nowIso, nowIso,
+  );
   const rel = `${ws}/${id}.mp4`;
   fs.mkdirSync(path.dirname(env.ctx.storage.abs(rel)), { recursive: true });
   fs.writeFileSync(env.ctx.storage.abs(rel), Buffer.alloc(2048, 7));
@@ -68,11 +84,18 @@ function addAsset(env: TestEnv, ws: string, o: { dur?: number; w?: number; h?: n
      VALUES (?, ?, 'generated', 'provider', ?, ?, ?, 2048, ?, ?, ?, ?, ?)`,
     id, ws, `${id}.mp4`, rel, o.mime ?? "video/mp4", id, o.dur ?? 8, o.w ?? 1080, o.h ?? 1920, new Date().toISOString(),
   );
+  env.ctx.db.run("UPDATE video_assets SET source_job_id = ? WHERE id = ?", jid, id);
   return id;
 }
 
-const configure = (env: TestEnv, ws: string, p: Record<string, unknown> = {}) =>
-  saveReelsConfig(env.ctx, ws, { pageId: PAGE, pageToken: TOKEN, ...p });
+/** Tạo Page đầu tiên của workspace (lần gọi đầu) hoặc cập nhật Page đó */
+const configure = (env: TestEnv, ws: string, p: Record<string, unknown> = {}) => {
+  const cur = pageByWs.get(ws);
+  if (cur) return updatePage(env.ctx, ws, cur, p);
+  const pg = createPage(env.ctx, ws, { pageId: PAGE, pageToken: TOKEN, ...p });
+  pageByWs.set(ws, pg.id);
+  return pg;
+};
 
 const statusOf = (env: TestEnv, assetId: string) => env.ctx.db.get<any>("SELECT * FROM fb_reel_posts WHERE asset_id = ?", assetId);
 
@@ -106,47 +129,45 @@ describe("caption", () => {
   });
 });
 
-describe("cấu hình & che token", () => {
+describe("cấu hình Page & che token", () => {
   test("mặc định, che token, validate", async () => {
-    const { env, c, ws } = await setup("cfg");
+    const { env, c } = await setup("cfg");
     try {
-      const d = (await c.get("/api/facebook/reels/config")).body;
-      assert.equal(d.requireApproval, true);
-      assert.equal(d.autoEnabled, false);
-      assert.equal(d.intervalMin, 60);
-      assert.equal(d.tokenConfigured, false);
+      const d = (await c.get("/api/facebook/pages")).body;
+      assert.deepEqual(d.pages, []);
+      assert.equal(d.settings.graphVersion, "v26.0");
       const logs: string[] = [];
       const orig = console.log;
       console.log = (...a) => logs.push(a.join(" "));
-      let put;
+      let post;
       try {
-        put = await c.req("PUT", "/api/facebook/reels/config", { pageId: PAGE, pageToken: TOKEN, hashtags: "#bvs" });
+        post = await c.req("POST", "/api/facebook/pages", { pageId: PAGE, pageToken: TOKEN, hashtags: "#bvs" });
       } finally {
         console.log = orig;
       }
-      assert.equal(put.status, 200);
-      assert.equal(put.body.tokenConfigured, true);
-      assert.equal(put.body.tokenLast4, TOKEN.slice(-4));
-      assert.ok(!put.raw.toString().includes(TOKEN));
-      assert.ok(!(await c.get("/api/facebook/reels/config")).raw.toString().includes(TOKEN));
+      assert.equal(post.status, 200);
+      assert.equal(post.body.requireApproval, true);
+      assert.equal(post.body.autoEnabled, false);
+      assert.equal(post.body.intervalMin, 60);
+      assert.equal(post.body.tokenConfigured, true);
+      assert.equal(post.body.tokenLast4, TOKEN.slice(-4));
+      assert.ok(!post.raw.toString().includes(TOKEN));
+      assert.ok(!(await c.get("/api/facebook/pages")).raw.toString().includes(TOKEN));
       assert.ok(!logs.join("\n").includes(TOKEN));
-      const row = env.ctx.db.get<any>("SELECT value_json, secret_enc FROM settings WHERE workspace_id = ? AND key = 'facebook_reels'", ws);
-      assert.ok(!row.value_json.includes(TOKEN));
-      assert.ok(row.secret_enc && !row.secret_enc.includes(TOKEN));
-      assert.equal(env.ctx.secrets.decrypt(row.secret_enc), TOKEN);
+      const id = post.body.id;
+      const row = env.ctx.db.get<any>("SELECT token_enc FROM fb_pages WHERE id = ?", id);
+      assert.ok(row.token_enc && !row.token_enc.includes(TOKEN));
+      assert.equal(env.ctx.secrets.decrypt(row.token_enc), TOKEN);
       const audits = JSON.stringify(env.ctx.db.all("SELECT * FROM audit_log"));
       assert.ok(!audits.includes(TOKEN));
-      assert.equal((await c.req("PUT", "/api/facebook/reels/config", { graphVersion: "26" })).status, 400);
-      assert.equal((await c.req("PUT", "/api/facebook/reels/config", { intervalMin: 1 })).status, 400);
+      assert.equal((await c.req("PUT", "/api/facebook/reels/settings", { graphVersion: "26" })).status, 400);
+      assert.equal((await c.req("PUT", `/api/facebook/pages/${id}`, { intervalMin: 1 })).status, 400);
       // để trống token = giữ nguyên
-      assert.equal((await c.req("PUT", "/api/facebook/reels/config", { intervalMin: 30 })).body.tokenConfigured, true);
-      // bật tự động khi thiếu token
-      const { env: e2, c: c2 } = await setup("cfg2");
-      try {
-        assert.equal((await c2.req("PUT", "/api/facebook/reels/config", { autoEnabled: true })).status, 400);
-      } finally {
-        await e2.close();
-      }
+      assert.equal((await c.req("PUT", `/api/facebook/pages/${id}`, { intervalMin: 30 })).body.tokenConfigured, true);
+      assert.equal(env.ctx.secrets.decrypt(env.ctx.db.get<any>("SELECT token_enc FROM fb_pages WHERE id = ?", id).token_enc), TOKEN);
+      // thiếu token / Page ID khi tạo
+      assert.equal((await c.req("POST", "/api/facebook/pages", { pageId: "999999" })).status, 400);
+      assert.equal((await c.req("POST", "/api/facebook/pages", { pageToken: TOKEN })).status, 400);
     } finally {
       await env.close();
     }
@@ -212,15 +233,18 @@ describe("hàng đợi, duyệt, lập lịch", () => {
     const { env, ws } = await setup("enq");
     try {
       const a = addAsset(env, ws);
-      assert.equal(enqueueReel(env.ctx, a), false);
-      configure(env, ws, { autoEnabled: true });
+      assert.equal(enqueueReel(env.ctx, a), false, "chưa có Page nào");
+      configure(env, ws, { autoEnabled: false });
+      const a2 = addAsset(env, ws);
       // tắt tự động thì không xếp hàng (S4)
-      saveReelsConfig(env.ctx, ws, { autoEnabled: false });
-      assert.equal(enqueueReel(env.ctx, a), false);
-      saveReelsConfig(env.ctx, ws, { autoEnabled: true });
+      assert.equal(enqueueReel(env.ctx, a2), false);
+      assert.equal(enqueueReel(env.ctx, a), false, "batch tạo trước khi có Page thì không đăng");
+      env.ctx.db.run("UPDATE video_batches SET fb_page_id = ?", pageOf(ws));
+      configure(env, ws, { autoEnabled: true });
       assert.equal(enqueueReel(env.ctx, a), true);
       assert.equal(enqueueReel(env.ctx, a), false);
-      assert.equal(env.ctx.db.all("SELECT 1 FROM fb_reel_posts").length, 1);
+      assert.equal(env.ctx.db.all("SELECT 1 FROM fb_reel_posts WHERE asset_id = ?", a).length, 1);
+      assert.equal(statusOf(env, a).fb_page_id, pageOf(ws));
       assert.equal(statusOf(env, a).status, "pending_review");
       const bad = addAsset(env, ws, { w: 1920, h: 1080 });
       enqueueReel(env.ctx, bad);
@@ -271,7 +295,7 @@ describe("hàng đợi, duyệt, lập lịch", () => {
       assert.equal(env.ctx.db.get<any>("SELECT status FROM fb_reel_posts WHERE id = ?", qid).status, "removed");
       assert.ok(env.ctx.db.get("SELECT 1 FROM video_assets WHERE id = ?", a));
       assert.ok(fs.existsSync(env.ctx.storage.abs(`${ws}/${a}.mp4`)));
-      assert.equal(listQueue(env.ctx, ws).items.length, 1);
+      assert.equal(listQueue(env.ctx, ws, {}).items.length, 1);
     } finally {
       await env.close();
     }
@@ -370,23 +394,23 @@ describe("hàng đợi, duyệt, lập lịch", () => {
     }
   });
 
-  test("kiểm tra kết nối cấu hình (mock)", async () => {
+  test("kiểm tra kết nối cấu hình (mock): chỉ GET, tự lấy tên", async () => {
     const g = fakeGraph();
     const { env, c } = await setup("conn", g.f);
     try {
-      assert.equal((await c.post("/api/facebook/reels/config/test")).status, 409);
-      await c.req("PUT", "/api/facebook/reels/config", { pageId: PAGE, pageToken: TOKEN });
-      const r = await c.post("/api/facebook/reels/config/test");
+      const pg = (await c.req("POST", "/api/facebook/pages", { pageId: PAGE, pageToken: TOKEN })).body;
+      const r = await c.post(`/api/facebook/pages/${pg.id}/test`);
       assert.equal(r.body.ok, true);
       assert.equal(r.body.pageName, "Trang thử");
       assert.ok(!r.raw.toString().includes(TOKEN));
+      assert.equal(g.calls.length, 1);
+      assert.ok(g.calls.every((x) => x.method === "GET"));
+      assert.equal((await c.get("/api/facebook/pages")).body.pages[0].name, "Trang thử");
     } finally {
       await env.close();
     }
   });
 });
-
-void getReelsConfig;
 
 // ---------------------------------------------------------------- vòng sửa theo review của Rex
 const mkPub = (env: TestEnv, t: () => number, extra: Record<string, unknown> = {}) =>
@@ -405,8 +429,8 @@ describe("B1 xoá khỏi hàng rồi tick", () => {
       const bid = newId("bat");
       const jid = newId("job");
       env.ctx.db.run(
-        "INSERT INTO video_batches (id, workspace_id, name, mode, provider_config_id, model_id, config_json, max_concurrency, status, created_at, updated_at) VALUES (?, ?, 'b', 'single', 'p', 'm', '{}', 1, 'completed', ?, ?)",
-        bid, ws, now, now,
+        "INSERT INTO video_batches (id, workspace_id, name, mode, provider_config_id, model_id, config_json, max_concurrency, status, fb_page_id, created_at, updated_at) VALUES (?, ?, 'b', 'single', 'p', 'm', '{}', 1, 'completed', ?, ?, ?)",
+        bid, ws, pageOf(ws), now, now,
       );
       env.ctx.db.run(
         "INSERT INTO video_batch_jobs (id, batch_id, workspace_id, seq, prompt, provider_config_id, model_id, config_json, status, output_asset_id, lineage_id, created_at, updated_at) VALUES (?, ?, ?, 1, 'p', 'p', 'm', '{}', 'completed', ?, ?, ?, ?)",
@@ -425,7 +449,7 @@ describe("B1 xoá khỏi hàng rồi tick", () => {
       assert.equal(rupCount(g), 1, "không đăng lại");
       assert.equal(env.ctx.db.all("SELECT 1 FROM fb_reel_posts WHERE asset_id = ?", a).length, 1, "dòng dấu vẫn còn, enqueue không tạo mới");
       assert.equal(enqueueReel(env.ctx, a), false);
-      assert.equal(listQueue(env.ctx, ws).items.length, 0);
+      assert.equal(listQueue(env.ctx, ws, {}).items.length, 0);
     } finally {
       await env.close();
     }
@@ -438,8 +462,8 @@ describe("B1 xoá khỏi hàng rồi tick", () => {
       enqueueReel(env.ctx, a);
       const id = statusOf(env, a).id;
       assert.equal((await c.req("DELETE", `/api/facebook/reels/queue/${id}`)).status, 200);
-      assert.equal(sweepMissing(env.ctx, ws), 0);
-      assert.equal(listQueue(env.ctx, ws).items.length, 0);
+      assert.equal(sweepMissing(env.ctx, pageOf(ws)), 0);
+      assert.equal(listQueue(env.ctx, ws, {}).items.length, 0);
       assert.equal((await c.req("DELETE", `/api/facebook/reels/queue/${id}`)).status, 404);
       assert.equal((await c.post(`/api/facebook/reels/queue/${id}/approve`)).status, 404);
     } finally {
@@ -468,15 +492,15 @@ describe("B2 tạm dừng khi lỗi token/quyền; thử lại lỗi tạm thờ
         await pub.tickOnce();
         assert.equal(g.calls.length, 1, "auth không thử lại");
         const q = (await c.get("/api/facebook/reels/queue")).body;
-        assert.equal(q.pause.kind, kind);
+        assert.equal(q.pauses[pageOf(ws)].kind, kind);
         assert.ok(!JSON.stringify(q).includes(TOKEN));
         assert.deepEqual(env.ctx.db.all<any>("SELECT status FROM fb_reel_posts").map((r) => r.status).sort(), ["approved", "approved"]);
         t += 60 * 60_000;
         await pub.tickOnce();
         await pub.tickOnce();
         assert.equal(g.calls.length, 1, "đang tạm dừng: không gọi Facebook");
-        assert.equal((await c.post("/api/facebook/reels/resume")).status, 200);
-        assert.equal((await c.get("/api/facebook/reels/queue")).body.pause, null);
+        assert.equal((await c.post(`/api/facebook/pages/${pageOf(ws)}/resume`)).status, 200);
+        assert.deepEqual((await c.get("/api/facebook/reels/queue")).body.pauses, {});
         await pub.tickOnce();
         assert.equal(g.calls.length, 2, "sau Tiếp tục thì thử đăng lại");
       } finally {
@@ -568,7 +592,7 @@ describe("B2 tạm dừng khi lỗi token/quyền; thử lại lỗi tạm thờ
       enqueueReel(env.ctx, a);
       await mkPub(env, () => 1_700_000_000_000).tickOnce();
       assert.equal(statusOf(env, a).status, "failed");
-      assert.equal(getReelsPause(env.ctx, ws)?.kind, "token");
+      assert.equal(getPagePause(env.ctx, pageOf(ws))?.kind, "token");
     } finally {
       await env.close();
     }
@@ -643,17 +667,17 @@ describe("S4 tắt rồi bật lại tự động", () => {
     const { env, ws } = await setup("s4");
     try {
       configure(env, ws, { autoEnabled: true });
-      const s1 = getReelsConfig(env.ctx, ws).enabledSince;
+      const s1 = getPage(env.ctx, ws, pageOf(ws)).enabledSince;
       assert.ok(s1);
-      saveReelsConfig(env.ctx, ws, { autoEnabled: false });
+      configure(env, ws, { autoEnabled: false });
       const during = addAsset(env, ws);
       assert.equal(enqueueReel(env.ctx, during), false);
-      assert.equal(sweepMissing(env.ctx, ws), 0);
+      assert.equal(sweepMissing(env.ctx, pageOf(ws)), 0);
       await new Promise((r) => setTimeout(r, 5));
-      saveReelsConfig(env.ctx, ws, { autoEnabled: true });
-      const s2 = getReelsConfig(env.ctx, ws).enabledSince!;
+      configure(env, ws, { autoEnabled: true });
+      const s2 = getPage(env.ctx, ws, pageOf(ws)).enabledSince!;
       assert.ok(s2 > s1!);
-      assert.equal(sweepMissing(env.ctx, ws), 0, "video cũ (trước mốc mới) không được xếp");
+      assert.equal(sweepMissing(env.ctx, pageOf(ws)), 0, "video cũ (trước mốc mới) không được xếp");
       assert.equal(env.ctx.db.all("SELECT 1 FROM fb_reel_posts").length, 0);
     } finally {
       await env.close();
@@ -674,7 +698,7 @@ describe("S6 retry bài đã từ chối", () => {
       assert.equal(statusOf(env, a).status, "pending_review");
       assert.equal(statusOf(env, a).approved_at, null);
       await c.post(`/api/facebook/reels/queue/${id}/reject`);
-      saveReelsConfig(env.ctx, ws, { requireApproval: false });
+      configure(env, ws, { requireApproval: false });
       assert.equal((await c.post(`/api/facebook/reels/queue/${id}/retry`)).status, 200);
       assert.equal(statusOf(env, a).status, "approved");
     } finally {
