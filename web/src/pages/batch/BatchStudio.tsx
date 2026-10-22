@@ -15,6 +15,7 @@ import { AiGenerateForm } from "./AiGenerateForm";
 import { BatchesSection } from "./BatchesSection";
 import { DeployDialog } from "./DeployDialog";
 import { FileImport, LineCounter, LIST_PLACEHOLDER, MakeSetButton, type CreateTab } from "./CreateArea";
+import { FbPageSelect, useFbPages } from "./FbPageSelect";
 import { PromptSetPanel } from "./PromptSetPanel";
 import { useVideoConfig } from "./useVideoConfig";
 import { ReferencePicker, VideoConfigPanel } from "./VideoConfigPanel";
@@ -173,6 +174,7 @@ export function BatchStudio() {
       budgetLimit: cfg.budgetLimit,
       blankLines: src.blankLines,
       lines: src.lines,
+      fbPage: fb.toRequest(fbPage),
     };
   };
 
@@ -270,6 +272,9 @@ export function BatchStudio() {
     setFile({ name: f.name, size: f.size, text });
   };
 
+  const fb = useFbPages();
+  const [fbPage, setFbPage] = useState("");
+  const fbReady = fb.isReady(fbPage);
   const canAct = Boolean(cfg.provider && cfg.model) && !busy;
 
   // Bộ prompt vừa sinh đã tải xong → mở triển khai (Mock chạy luôn, provider tính phí vẫn hỏi chi phí)
@@ -347,6 +352,7 @@ export function BatchStudio() {
             <Field label="Tên batch (tùy chọn)">
               <Input value={batchName} onChange={(e) => setBatchName(e.target.value)} placeholder="vd: Serum - đợt 1" />
             </Field>
+            <FbPageSelect pages={fb.pages} value={fbPage} onChange={setFbPage} disabled={Boolean(busy)} />
             <div className="action-buttons">
               <Button icon={<ShieldCheck size={15} />} loading={busy === "check"} disabled={!canAct} onClick={() => void runEstimate("check")}>
                 Kiểm tra prompt
@@ -355,7 +361,7 @@ export function BatchStudio() {
                 Ước tính chi phí
               </Button>
             </div>
-            <Button variant="primary" size="lg" block icon={<Rocket size={16} />} loading={busy === "create"} disabled={!canAct} onClick={() => void createBatch()}>
+            <Button variant="primary" size="lg" block icon={<Rocket size={16} />} loading={busy === "create"} disabled={!canAct || !fbReady} title={fbReady ? undefined : "Chọn Page đăng Facebook (hoặc “Không đăng lên Facebook”) trước"} onClick={() => void createBatch()}>
               Tạo batch
             </Button>
             <p className="muted tiny">Tạo batch chỉ lưu ở trạng thái “Chờ duyệt” - chưa gọi provider, chưa tốn phí cho tới khi bạn bấm “Duyệt & chạy”.</p>

@@ -402,6 +402,8 @@ export interface Batch {
   counts: Partial<Record<JobStatus, number>>;
   total: number;
   progress: number;
+  /** null = không có Page nào lúc tạo; "none" = chọn rõ không đăng */
+  fbPage?: "none" | { id: string; name: string } | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -419,6 +421,8 @@ export interface BatchRequest {
   budgetLimit?: number | null;
   blankLines?: number[];
   lines?: (number | null)[];
+  /** id Page Facebook | "none". Bắt buộc khi đã có Page */
+  fbPage?: string;
 }
 
 export interface CostConfirm {
@@ -442,6 +446,7 @@ export interface DeployBody {
   name?: string;
   dryRun?: boolean;
   run?: { confirm: true; approvedMaxCost?: number | null; acknowledgeUnknownCost?: boolean };
+  fbPage?: string;
 }
 
 export interface DeployResult {
@@ -602,20 +607,30 @@ function qs(params: Record<string, string | number | boolean | null | undefined>
   return s ? `?${s}` : "";
 }
 
-export interface FbReelsConfig {
-  pageId: string;
+/** Cài đặt CHUNG cho mọi Page */
+export interface FbSettings {
   graphVersion: string;
-  intervalMin: number;
-  autoEnabled: boolean;
-  requireApproval: boolean;
   captionTemplate: string;
-  hashtags: string;
   aiCaption: boolean;
-  enabledSince: string | null;
+}
+
+export interface FbPage {
+  id: string;
+  name: string;
+  pageId: string;
   tokenConfigured: boolean;
   tokenLast4: string | null;
-  updatedAt: string | null;
+  autoEnabled: boolean;
+  intervalMin: number;
+  requireApproval: boolean;
+  hashtags: string;
+  enabledSince: string | null;
+  pause: FbReelsPause | null;
+  createdAt: string;
+  updatedAt: string;
 }
+
+export type FbPageInput = Partial<Pick<FbPage, "name" | "pageId" | "autoEnabled" | "intervalMin" | "requireApproval" | "hashtags">> & { pageToken?: string };
 
 export type FbReelStatus = "pending_review" | "approved" | "publishing" | "published" | "failed" | "skipped" | "rejected" | "removed";
 
@@ -628,6 +643,8 @@ export interface FbReelsPause {
 export interface FbReelItem {
   id: string;
   assetId: string;
+  pageId: string | null;
+  pageName: string | null;
   status: FbReelStatus;
   statusLabel: string;
   title: string;
@@ -661,11 +678,14 @@ export const api = {
   tokens: () => get<{ tokens: ApiToken[] }>("/api/tokens"),
   createToken: (name: string) => post<{ id: string; token: string; note: string }>("/api/tokens", { name }),
   revokeToken: (id: string) => del<{ ok: boolean }>(`/api/tokens/${enc(id)}`),
-  fbReelsConfig: () => get<FbReelsConfig>("/api/facebook/reels/config"),
-  saveFbReelsConfig: (body: Partial<Omit<FbReelsConfig, "tokenConfigured" | "tokenLast4" | "updatedAt" | "enabledSince">> & { pageToken?: string | null }) => put<FbReelsConfig>("/api/facebook/reels/config", body),
-  testFbReels: () => post<{ ok: boolean; pageName?: string; message: string }>("/api/facebook/reels/config/test"),
-  fbReelsQueue: () => get<{ items: FbReelItem[]; pause: FbReelsPause | null }>("/api/facebook/reels/queue"),
-  fbReelsResume: () => post<{ ok: boolean }>("/api/facebook/reels/resume"),
+  fbPages: () => get<{ pages: FbPage[]; settings: FbSettings }>("/api/facebook/pages"),
+  createFbPage: (body: FbPageInput) => post<FbPage>("/api/facebook/pages", body),
+  saveFbPage: (id: string, body: FbPageInput) => put<FbPage>(`/api/facebook/pages/${enc(id)}`, body),
+  deleteFbPage: (id: string) => del<{ ok: boolean; cancelled: number }>(`/api/facebook/pages/${enc(id)}`),
+  testFbPage: (id: string) => post<{ ok: boolean; pageName?: string; message: string }>(`/api/facebook/pages/${enc(id)}/test`),
+  resumeFbPage: (id: string) => post<{ ok: boolean }>(`/api/facebook/pages/${enc(id)}/resume`),
+  saveFbSettings: (body: Partial<FbSettings>) => put<FbSettings>("/api/facebook/reels/settings", body),
+  fbReelsQueue: (f: { pageId?: string } = {}) => get<{ items: FbReelItem[]; pauses: Record<string, FbReelsPause> }>(`/api/facebook/reels/queue${qs({ pageId: f.pageId })}`),
   fbReelsApprove: (id: string) => post<FbReelItem>(`/api/facebook/reels/queue/${enc(id)}/approve`),
   fbReelsReject: (id: string) => post<{ ok: boolean }>(`/api/facebook/reels/queue/${enc(id)}/reject`),
   fbReelsRetry: (id: string) => post<{ ok: boolean }>(`/api/facebook/reels/queue/${enc(id)}/retry`),

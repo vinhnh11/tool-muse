@@ -11,6 +11,7 @@ import { useToast } from "../../components/Toast";
 import { emitLocal } from "../../hooks/useEvents";
 import { MODE_LABEL, fmtCost, fmtSeconds } from "../../labels";
 import { useStudio } from "../../state/studio";
+import { FbPageSelect, useFbPages } from "./FbPageSelect";
 import type { ResolvedConfig } from "./useVideoConfig";
 
 /**
@@ -44,6 +45,11 @@ export function DeployDialog({
   /** Người dùng tự đổi provider/model trong dialog -> không auto-chạy nữa, phải bấm tay */
   const userPicked = useRef(false);
   const [fixing, setFixing] = useState(false);
+  const fb = useFbPages();
+  const [fbPage, setFbPage] = useState("");
+  const fbReady = fb.isReady(fbPage);
+  const fbReadyRef = useRef(false);
+  fbReadyRef.current = fbReady;
 
   const body = useCallback((): DeployBody => {
     const neg = cfg.model?.negativePrompt && cfg.state.negative.trim() ? cfg.state.negative.trim() : null;
@@ -57,8 +63,9 @@ export function DeployDialog({
       defaultNegative: neg,
       maxConcurrency: cfg.state.maxConcurrency,
       budgetLimit: cfg.budgetLimit,
+      fbPage: fb.toRequest(fbPage),
     };
-  }, [cfg, selection, useItemOverrides, sessionId, set.sessionId]);
+  }, [cfg, selection, useItemOverrides, sessionId, set.sessionId, fb, fbPage]);
 
   /** Dọn negative cả bộ rồi tính lại - dùng khi model không nhận negative (vd Muse) */
   const clearNegatives = useCallback(async () => {
@@ -126,7 +133,8 @@ export function DeployDialog({
       .then((p) => {
         if (!alive) return;
         setPreview(p);
-        if (autoRunFree && !autoDone.current && !userPicked.current && p.free && p.check.ok) {
+        // Đã có Page thì không tự chạy: người dùng phải chọn Page đích trước
+        if (autoRunFree && !autoDone.current && !userPicked.current && p.free && p.check.ok && fb.loaded && fb.pages.length === 0) {
           autoDone.current = true;
           void deploy(p, false);
         }
@@ -136,13 +144,13 @@ export function DeployDialog({
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [set.id, provId, modId]);
+  }, [set.id, provId, modId, fb.loaded]);
 
   /** Bộ prompt có negative nhưng model không nhận -> cho dọn ngay trong dialog */
   const negBlocked = Boolean(preview && !preview.check.ok && preview.check.items.some((it) => it.issues.some((g) => g.code === "NEGATIVE_UNSUPPORTED")));
   const unknown = preview ? preview.estimate.total === null : false;
   const currency = preview?.estimate.currency ?? "USD";
-  const can = Boolean(preview && preview.check.ok && preview.videoCount > 0 && (!unknown || ack) && !busy && preview.estimate.withinBudget !== false);
+  const can = Boolean(fbReady && preview && preview.check.ok && preview.videoCount > 0 && (!unknown || ack) && !busy && preview.estimate.withinBudget !== false);
   const cfgLine = cfg.config ? `${MODE_LABEL[cfg.config.mode]} · ${fmtSeconds(cfg.config.durationSec)} · ${cfg.config.aspectRatio} · ${cfg.config.resolution}${cfg.config.audio ? " · có âm thanh" : ""}` : "";
 
   return (
@@ -219,6 +227,7 @@ export function DeployDialog({
               ) : null}
             </div>
           </div>
+          <FbPageSelect pages={fb.pages} value={fbPage} onChange={setFbPage} disabled={busy} />
           {cfg.state.variantsPerPrompt > 1 ? <Banner tone="info">Triển khai luôn tạo 1 video cho mỗi prompt - bỏ qua “Số lần tạo mỗi prompt” ({cfg.state.variantsPerPrompt}).</Banner> : null}
           {preview.free ? <MockBadge /> : null}
           {!preview.check.ok ? (

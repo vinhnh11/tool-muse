@@ -66,7 +66,7 @@ function BatchHeader({ batch, reload, onDeleted }: { batch: Batch; reload: () =>
             {batch.providerType === "mock" ? <MockBadge /> : null}
           </div>
           <div className="muted small">
-            {batch.providerName ?? batch.providerConfigId} · <code>{batch.modelId}</code> · {MODE_LABEL[batch.config.mode]} · {fmtSeconds(batch.config.durationSec)} · {batch.config.aspectRatio} · {batch.config.resolution}
+            {batch.providerName ?? batch.providerConfigId} · <code>{batch.modelId}</code> · {MODE_LABEL[batch.config.mode]} · {fmtSeconds(batch.config.durationSec)} · {batch.config.aspectRatio} · {batch.config.resolution}{batch.fbPage ? ` · Đăng lên: ${batch.fbPage === "none" ? "không đăng" : batch.fbPage.name}` : ""}
             {batch.config.audio ? " · âm thanh" : ""} · tạo {fmtRelative(batch.createdAt)}
           </div>
         </div>
