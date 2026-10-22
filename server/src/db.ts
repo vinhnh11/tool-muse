@@ -13,14 +13,14 @@ export class Db {
   readonly file: string;
   private depth = 0;
 
-  constructor(dataDir: string, fileName = "studio.db") {
+  constructor(dataDir: string, fileName = "studio.db", maxMigration = Infinity) {
     this.file = fileName === ":memory:" ? ":memory:" : path.join(dataDir, fileName);
     this.raw = new DatabaseSync(this.file);
     this.raw.exec("PRAGMA journal_mode = WAL;");
     this.raw.exec("PRAGMA busy_timeout = 5000;");
     this.raw.exec("PRAGMA foreign_keys = ON;");
     this.raw.exec("PRAGMA synchronous = NORMAL;");
-    migrate(this);
+    migrate(this, maxMigration);
   }
 
   run(sql: string, ...params: SQLInputValue[]): { changes: number; lastInsertRowid: number | bigint } {
@@ -401,14 +401,68 @@ CREATE TABLE fb_reel_posts (
 CREATE INDEX idx_fbr_status ON fb_reel_posts(workspace_id, status, created_at);
 `,
   },
+  {
+    version: 3,
+    sql: `
+-- Facebook nhiều Page: mỗi dòng = một Page. Token giữ NGUYÊN bản mã hoá (ctx.secrets), không giải mã khi migrate.
+CREATE TABLE fb_pages (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  name_custom INTEGER NOT NULL DEFAULT 0,
+  page_id TEXT NOT NULL,
+  token_enc TEXT,
+  token_last4 TEXT,
+  auto_enabled INTEGER NOT NULL DEFAULT 0,
+  interval_min INTEGER NOT NULL DEFAULT 60,
+  require_approval INTEGER NOT NULL DEFAULT 1,
+  hashtags TEXT NOT NULL DEFAULT '',
+  enabled_since TEXT,
+  last_publish_at INTEGER NOT NULL DEFAULT 0,
+  pause_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+);
+CREATE UNIQUE INDEX uq_fb_pages_active ON fb_pages(workspace_id, page_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_fb_pages_ws ON fb_pages(workspace_id, deleted_at);
+ALTER TABLE fb_reel_posts ADD COLUMN fb_page_id TEXT;
+ALTER TABLE video_batches ADD COLUMN fb_page_id TEXT;
+CREATE INDEX idx_fbr_page ON fb_reel_posts(fb_page_id, status, created_at);
+
+-- Cấu hình một-Page cũ → Page đầu tiên (id cố định nên chạy lại cũng không nhân đôi)
+INSERT OR IGNORE INTO fb_pages (id, workspace_id, name, name_custom, page_id, token_enc, token_last4, auto_enabled, interval_min, require_approval, hashtags, enabled_since, last_publish_at, pause_json, created_at, updated_at)
+SELECT 'fbp_legacy_' || s.workspace_id, s.workspace_id, 'Page chính', 0,
+       json_extract(s.value_json, '$.pageId'), s.secret_enc, json_extract(s.value_json, '$.tokenLast4'),
+       CASE WHEN json_extract(s.value_json, '$.autoEnabled') IN (1, 'true') THEN 1 ELSE 0 END,
+       COALESCE(json_extract(s.value_json, '$.intervalMin'), 60),
+       CASE WHEN json_extract(s.value_json, '$.requireApproval') IN (0, 'false') THEN 0 ELSE 1 END,
+       COALESCE(json_extract(s.value_json, '$.hashtags'), ''),
+       json_extract(s.value_json, '$.enabledSince'),
+       COALESCE((SELECT json_extract(st.value_json, '$.lastPublishAt') FROM settings st WHERE st.workspace_id = s.workspace_id AND st.key = 'facebook_reels_state'), 0),
+       (SELECT json_extract(st.value_json, '$.pause') FROM settings st WHERE st.workspace_id = s.workspace_id AND st.key = 'facebook_reels_state'),
+       s.updated_at, s.updated_at
+FROM settings s
+WHERE s.key = 'facebook_reels' AND s.secret_enc IS NOT NULL
+  AND COALESCE(json_extract(s.value_json, '$.pageId'), '') <> '';
+
+UPDATE fb_reel_posts SET fb_page_id = 'fbp_legacy_' || workspace_id
+ WHERE fb_page_id IS NULL AND EXISTS (SELECT 1 FROM fb_pages p WHERE p.id = 'fbp_legacy_' || fb_reel_posts.workspace_id);
+-- Batch cũ của workspace đang bật tự đăng vẫn được đăng (giữ hành vi cũ)
+UPDATE video_batches SET fb_page_id = 'fbp_legacy_' || workspace_id
+ WHERE fb_page_id IS NULL AND EXISTS (SELECT 1 FROM fb_pages p WHERE p.id = 'fbp_legacy_' || video_batches.workspace_id AND p.auto_enabled = 1);
+`,
+  },
 ];
 
-function migrate(db: Db): void {
+export function migrate(db: Db, maxVersion = Infinity): void {
   db.raw.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
   const done = new Set(db.all<{ version: number }>("SELECT version FROM schema_migrations").map((r) => Number(r.version)));
   for (const m of MIGRATIONS) {
-    if (done.has(m.version)) continue;
+    if (done.has(m.version) || m.version > maxVersion) continue;
     db.tx(() => {
+      // Hai tiến trình cùng khởi động: kiểm tra lại trong giao dịch (ALTER ADD COLUMN không idempotent)
+      if (db.get("SELECT 1 FROM schema_migrations WHERE version = ?", m.version)) return;
       db.raw.exec(m.sql);
       db.run("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", m.version, new Date().toISOString());
     });

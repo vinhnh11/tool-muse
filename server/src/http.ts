@@ -21,7 +21,7 @@ import { mimeOf } from "./storage.ts";
 import { invokeTool, TOOLS, toJsonSchema } from "./tools.ts";
 import { nudgeJob } from "./scheduler.ts";
 import { AppError, redact, timingSafeEqualStr } from "./util.ts";
-import { clearReelsPause, getPageToken, getReelsConfig, saveReelsConfig } from "./fbreels/config.ts";
+import { clearPagePause, createPage, deletePage, getPage, getPageCredentials, getSharedSettings, listPages, saveSharedSettings, setAutoPageName, updatePage } from "./fbreels/config.ts";
 import { GraphReelsClient } from "./fbreels/graph.ts";
 import { approve as reelApprove, listQueue, reject as reelReject, remove as reelRemove, retry as reelRetry } from "./fbreels/queue.ts";
 
@@ -203,39 +203,65 @@ export function createApp(ctx: AppContext): express.Express {
   const uid = (req: AuthedRequest): string => req.principal!.user.id;
   const fbAudit = (req: AuthedRequest, action: string, targetId?: string, data?: unknown): void =>
     audit(ctx.db, { workspaceId: ws(req), userId: uid(req), actor: actorOf(req).kind, action, targetType: "fb_reel", targetId, data });
-  app.get("/api/facebook/reels/config", h((req) => getReelsConfig(ctx, ws(req))));
-  app.put(
-    "/api/facebook/reels/config",
+  app.get("/api/facebook/pages", h((req) => ({ pages: listPages(ctx, ws(req)), settings: getSharedSettings(ctx, ws(req)) })));
+  app.post(
+    "/api/facebook/pages",
     h((req) => {
-      const b = req.body ?? {};
-      const out = saveReelsConfig(ctx, ws(req), b);
-      fbAudit(req, "fb.reel.config", undefined, { pageId: out.pageId, graphVersion: out.graphVersion, intervalMin: out.intervalMin, autoEnabled: out.autoEnabled, requireApproval: out.requireApproval, tokenChanged: b.pageToken !== undefined });
+      const out = createPage(ctx, ws(req), req.body ?? {});
+      fbAudit(req, "fb.page.create", out.id, { pageId: out.pageId, name: out.name });
       return out;
     }),
   );
+  app.put(
+    "/api/facebook/pages/:id",
+    h((req) => {
+      const b = req.body ?? {};
+      const out = updatePage(ctx, ws(req), String(req.params.id), b);
+      fbAudit(req, "fb.page.update", out.id, { pageId: out.pageId, intervalMin: out.intervalMin, autoEnabled: out.autoEnabled, requireApproval: out.requireApproval, tokenChanged: Boolean(b.pageToken) });
+      return out;
+    }),
+  );
+  app.delete(
+    "/api/facebook/pages/:id",
+    h((req) => {
+      const r = deletePage(ctx, ws(req), String(req.params.id));
+      fbAudit(req, "fb.page.delete", String(req.params.id), r);
+      return { ok: true, ...r };
+    }),
+  );
+  /** Kiểm tra kết nối: CHỈ GET tên Page, không đăng gì */
   app.post(
-    "/api/facebook/reels/config/test",
+    "/api/facebook/pages/:id/test",
     h(async (req) => {
-      const cfg = getReelsConfig(ctx, ws(req));
-      if (!cfg.pageId || !cfg.tokenConfigured) throw new AppError("FB_NOT_CONFIGURED", "Chưa nhập Page ID và Page access token.", 409);
-      const token = getPageToken(ctx, ws(req));
+      const page = getPage(ctx, ws(req), String(req.params.id));
+      const cred = getPageCredentials(ctx, page.id);
+      if (!cred) throw new AppError("FB_NOT_CONFIGURED", "Page chưa có access token.", 409);
       try {
-        const info = await new GraphReelsClient({ fetchImpl: ctx.fetchImpl, pageId: cfg.pageId, version: cfg.graphVersion, token }).pageInfo();
+        const info = await new GraphReelsClient({ fetchImpl: ctx.fetchImpl, pageId: cred.pageId, version: getSharedSettings(ctx, ws(req)).graphVersion, token: cred.token }).pageInfo();
+        setAutoPageName(ctx, page.id, info.name);
         return { ok: true, pageName: info.name, message: `Kết nối được Page "${info.name}".` };
       } catch (e) {
-        return { ok: false, message: redact((e as Error).message, [token]) };
+        return { ok: false, message: redact((e as Error).message, [cred.token]).replace(/EAA[A-Za-z0-9]{6,}/g, "***") };
       }
     }),
   );
   app.post(
-    "/api/facebook/reels/resume",
+    "/api/facebook/pages/:id/resume",
     h((req) => {
-      clearReelsPause(ctx, ws(req));
-      fbAudit(req, "fb.reel.resume");
+      clearPagePause(ctx, ws(req), String(req.params.id));
+      fbAudit(req, "fb.page.resume", String(req.params.id));
       return { ok: true };
     }),
   );
-  app.get("/api/facebook/reels/queue", h((req) => listQueue(ctx, ws(req), req.query.status ? String(req.query.status) : undefined)));
+  app.put(
+    "/api/facebook/reels/settings",
+    h((req) => {
+      const out = saveSharedSettings(ctx, ws(req), req.body ?? {});
+      fbAudit(req, "fb.reel.settings", undefined, out);
+      return out;
+    }),
+  );
+  app.get("/api/facebook/reels/queue", h((req) => listQueue(ctx, ws(req), { status: req.query.status ? String(req.query.status) : undefined, pageId: req.query.pageId ? String(req.query.pageId) : undefined })));
   app.post(
     "/api/facebook/reels/queue/:id/approve",
     h((req) => {
@@ -538,6 +564,7 @@ export function createApp(ctx: AppContext): express.Express {
         name: typeof b.name === "string" ? b.name : undefined,
         dryRun: b.dryRun === true,
         run,
+        fbPage: typeof b.fbPage === "string" ? b.fbPage : null,
       });
     }),
   );
@@ -598,6 +625,7 @@ export function createApp(ctx: AppContext): express.Express {
         lines: b.lines,
         maxConcurrency: num(b.maxConcurrency),
         budgetLimit: num(b.budgetLimit) ?? null,
+        fbPage: typeof b.fbPage === "string" ? b.fbPage : null,
       });
       return { batch: batches.batchToPublic(r.batch), check: r.check, estimate: r.estimate };
     }),

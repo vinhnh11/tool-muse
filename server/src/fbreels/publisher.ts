@@ -2,7 +2,7 @@ import fs from "node:fs";
 import type { AppContext } from "../context.ts";
 import { nowIso, redact, sleep as realSleep } from "../util.ts";
 import { buildCaption } from "./caption.ts";
-import { configuredWorkspaces, getLastPublishAt, getPageToken, getReelsConfig, getReelsPause, setLastPublishAt, setReelsPause, type ReelsConfig } from "./config.ts";
+import { enabledPages, getPageCredentials, getPublishPage, getSharedSettings, parsePause, reelsConfigFor, setPageLastPublishAt, setPagePause, tokenForRedact } from "./config.ts";
 import { GraphError, GraphReelsClient, isAuthKind, isTransientKind } from "./graph.ts";
 import { sweepMissing, type ReelPostRow } from "./queue.ts";
 
@@ -72,10 +72,9 @@ export class ReelsPublisher {
     const cutoff = new Date(this.now() - STALE_PUBLISHING_MS).toISOString();
     const rows = this.ctx.db.all<ReelPostRow>("SELECT * FROM fb_reel_posts WHERE status = 'publishing' AND (publishing_at IS NULL OR publishing_at < ?)", cutoff);
     for (const r of rows) {
-      const ws = r.workspace_id;
       if ((r.step === "finishing" || r.step === "finished") && r.fb_video_id) {
         try {
-          const client = this.client(ws, getReelsConfig(this.ctx, ws));
+          const client = this.client(r.fb_page_id);
           await client.waitUntilReady(r.fb_video_id, { maxMs: this.o.pollMaxMs, everyMs: this.o.pollEveryMs });
           this.markPublished(r.id);
         } catch (e) {
@@ -87,42 +86,49 @@ export class ReelsPublisher {
     }
   }
 
-  private client(ws: string, cfg: ReelsConfig): GraphReelsClient {
-    return new GraphReelsClient({ fetchImpl: this.ctx.fetchImpl, pageId: cfg.pageId, version: cfg.graphVersion, token: getPageToken(this.ctx, ws), sleep: this.o.sleep });
+  /**
+   * Bất biến chống đăng nhầm Page: Page ID + token luôn lấy từ ĐÚNG một dòng fb_pages (Page của mục hàng đợi),
+   * Graph version là cài đặt chung của workspace. Không có đường nào khác để lấy token.
+   */
+  private client(fbPageId: string | null): GraphReelsClient {
+    const cred = fbPageId ? getPageCredentials(this.ctx, fbPageId) : null;
+    if (!cred) throw new Error("Page đã bị xoá hoặc chưa có token.");
+    return new GraphReelsClient({ fetchImpl: this.ctx.fetchImpl, pageId: cred.pageId, version: getSharedSettings(this.ctx, cred.workspaceId).graphVersion, token: cred.token, sleep: this.o.sleep });
   }
 
-  /** Claim nguyên tử bài đến lượt của một workspace. Trả null nếu chưa đến hạn / không có gì. */
-  private claim(ws: string): ReelPostRow | null {
+  /** Claim nguyên tử bài đến lượt của MỘT Page (khoảng cách, tạm dừng, đang đăng đều tính riêng Page). Trả null nếu chưa đến hạn / không có gì. */
+  private claim(pageRowId: string): ReelPostRow | null {
     const ctx = this.ctx;
     return ctx.db.tx(() => {
-      const cfg = getReelsConfig(ctx, ws);
-      if (!cfg.autoEnabled || !cfg.tokenConfigured || !cfg.pageId) return null;
-      if (getReelsPause(ctx, ws)) return null; // tạm dừng do lỗi token/quyền, chờ người dùng bấm Tiếp tục
-      if (ctx.db.get("SELECT 1 FROM fb_reel_posts WHERE workspace_id = ? AND status = 'publishing' LIMIT 1", ws)) return null;
+      const page = getPublishPage(ctx, pageRowId);
+      if (!page || !page.auto_enabled) return null;
+      if (parsePause(page.pause_json)) return null; // tạm dừng do lỗi token/quyền của Page này, chờ người dùng bấm Tiếp tục
+      if (ctx.db.get("SELECT 1 FROM fb_reel_posts WHERE fb_page_id = ? AND status = 'publishing' LIMIT 1", page.id)) return null;
       const now = this.now();
-      let last = getLastPublishAt(ctx, ws);
+      let last = Number(page.last_publish_at ?? 0);
       if (last > now) {
         last = now; // đồng hồ bị chỉnh lùi: kẹp để không kẹt vô hạn
-        setLastPublishAt(ctx, ws, last);
+        setPageLastPublishAt(ctx, page.id, last);
       }
-      if (last && now - last < cfg.intervalMin * 60_000) return null;
-      const next = ctx.db.get<ReelPostRow>("SELECT * FROM fb_reel_posts WHERE workspace_id = ? AND status = 'approved' ORDER BY approved_at, created_at LIMIT 1", ws);
+      if (last && now - last < page.interval_min * 60_000) return null;
+      const next = ctx.db.get<ReelPostRow>("SELECT * FROM fb_reel_posts WHERE fb_page_id = ? AND status = 'approved' ORDER BY approved_at, created_at LIMIT 1", page.id);
       if (!next) return null;
       const ch = ctx.db.run("UPDATE fb_reel_posts SET status = 'publishing', publishing_at = ?, attempts = attempts + 1, step = NULL, error_message = NULL, updated_at = ? WHERE id = ? AND status = 'approved'", new Date(now).toISOString(), nowIso(), next.id).changes;
       if (!ch) return null;
-      setLastPublishAt(ctx, ws, now);
+      setPageLastPublishAt(ctx, page.id, now);
       return { ...next, status: "publishing" as const };
     });
   }
 
   async tickOnce(): Promise<void> {
-    for (const ws of configuredWorkspaces(this.ctx)) {
+    // Tuần tự từng Page; lỗi của Page này không chặn Page khác
+    for (const pg of enabledPages(this.ctx)) {
       try {
-        sweepMissing(this.ctx, ws);
+        sweepMissing(this.ctx, pg.id);
       } catch (e) {
         this.log(`sweep lỗi: ${redact((e as Error).message)}`);
       }
-      const post = this.claim(ws);
+      const post = this.claim(pg.id);
       if (post) await this.publish(post);
     }
   }
@@ -138,13 +144,7 @@ export class ReelsPublisher {
   }
 
   private markFailed(id: string, e: unknown, hint = ""): void {
-    let token = "";
-    try {
-      const ws = this.ctx.db.get<{ workspace_id: string }>("SELECT workspace_id FROM fb_reel_posts WHERE id = ?", id)?.workspace_id;
-      token = ws ? getPageToken(this.ctx, ws) : "";
-    } catch {
-      /* bỏ qua */
-    }
+    const token = tokenForRedact(this.ctx, this.ctx.db.get<{ fb_page_id: string | null }>("SELECT fb_page_id FROM fb_reel_posts WHERE id = ?", id)?.fb_page_id);
     const base = e instanceof GraphError || e instanceof Error ? e.message : String(e);
     const msg = redact(`${base}${hint ? ` ${hint}` : ""}`, [token]).replace(/EAA[A-Za-z0-9]{6,}/g, "***").slice(0, 600);
     this.ctx.db.run("UPDATE fb_reel_posts SET status = 'failed', error_message = ?, updated_at = ? WHERE id = ? AND status = 'publishing'", msg, nowIso(), id);
@@ -169,7 +169,8 @@ export class ReelsPublisher {
     const ctx = this.ctx;
     const ws = post.workspace_id;
     try {
-      const cfg = getReelsConfig(ctx, ws);
+      if (!post.fb_page_id || !getPublishPage(ctx, post.fb_page_id)) throw new Error("Page đã bị xoá nên không đăng.");
+      const cfg = reelsConfigFor(ctx, ws, post.fb_page_id);
       const asset = ctx.db.get<{ storage_path: string; file_name: string }>("SELECT storage_path, file_name FROM video_assets WHERE id = ?", post.asset_id);
       if (!asset) throw new Error("Video không còn tồn tại.");
       const file = ctx.storage.abs(asset.storage_path);
@@ -180,7 +181,7 @@ export class ReelsPublisher {
         caption = await buildCaption(ctx, { workspaceId: ws, prompt: job?.prompt ?? "", title: job?.title || asset.file_name }, cfg);
         ctx.db.run("UPDATE fb_reel_posts SET caption = ?, updated_at = ? WHERE id = ?", caption, nowIso(), post.id);
       }
-      const client = this.client(ws, cfg);
+      const client = this.client(post.fb_page_id);
       const { videoId, uploadUrl } = await this.withRetry(() => client.startUpload(), post);
       this.setStep(post.id, "started", { fb_video_id: videoId });
       await this.withRetry(() => client.uploadFile(uploadUrl, file), post);
@@ -197,17 +198,11 @@ export class ReelsPublisher {
       const cur = ctx.db.get<{ step: string | null }>("SELECT step FROM fb_reel_posts WHERE id = ?", post.id);
       const ambiguous = cur?.step === "finishing" || cur?.step === "finished";
       if (e instanceof GraphError && isAuthKind(e.kind)) {
-        // Lỗi token/quyền: tạm dừng cả hàng đợi của workspace để không đốt hết video
+        // Lỗi token/quyền: tạm dừng hàng đợi CỦA PAGE NÀY (Page khác vẫn chạy) để không đốt hết video
         const kind = e.kind as "token" | "permission";
-        const token = (() => {
-          try {
-            return getPageToken(ctx, ws);
-          } catch {
-            return "";
-          }
-        })();
-        setReelsPause(ctx, ws, { kind, message: redact(e.message, [token]).replace(/EAA[A-Za-z0-9]{6,}/g, "***").slice(0, 400), at: nowIso() });
-        this.log(`Tạm dừng hàng đợi (${ws}): lỗi ${kind}`);
+        const token = tokenForRedact(ctx, post.fb_page_id);
+        if (post.fb_page_id) setPagePause(ctx, post.fb_page_id, { kind, message: redact(e.message, [token]).replace(/EAA[A-Za-z0-9]{6,}/g, "***").slice(0, 400), at: nowIso() });
+        this.log(`Tạm dừng hàng đợi của Page ${post.fb_page_id}: lỗi ${kind}`);
         if (!ambiguous) {
           // Chưa gửi lệnh đăng cuối: trả về hàng đợi, đăng tiếp sau khi người dùng bấm Tiếp tục
           ctx.db.run("UPDATE fb_reel_posts SET status = 'approved', step = NULL, fb_video_id = NULL, updated_at = ? WHERE id = ? AND status = 'publishing'", nowIso(), post.id);

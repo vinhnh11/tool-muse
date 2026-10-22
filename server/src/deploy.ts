@@ -1,5 +1,6 @@
 import type { AppContext } from "./context.ts";
 import { BatchService, defaultBatchConfig, type Actor, type BatchCheck, type BatchConfig, type BatchEstimate, type BatchPromptInput } from "./batches.ts";
+import { resolveFbTarget } from "./fbreels/config.ts";
 import { PromptService } from "./promptgen.ts";
 import { AppError } from "./util.ts";
 
@@ -35,6 +36,8 @@ export interface DeployArgs {
   dryRun?: boolean;
   run?: { confirm: boolean; approvedMaxCost?: number | null; acknowledgeUnknownCost?: boolean } | null;
   autoRunIfFree?: boolean;
+  /** Đăng lên Page: id Page | "none". Bắt buộc khi tạo thật và đã có >=1 Page (dryRun không ép) */
+  fbPage?: string | null;
 }
 
 export interface DeployResult {
@@ -137,6 +140,7 @@ export class DeployService {
     const base = { dryRun: Boolean(args.dryRun), promptSetId: set.id, promptSetName: set.name, selection, promptCount: items.length, promptIndexes: lines, providerConfigId, modelId, free };
 
     if (args.dryRun) {
+      resolveFbTarget(this.ctx, workspaceId, args.fbPage, false); // chỉ kiểm giá trị nếu có, không ép chọn
       const full = defaultBatchConfig({ ...cfgIn, variantsPerPrompt: 1 });
       const check = this.batches.check(workspaceId, { providerConfigId, modelId, config: full, prompts, lines });
       const maxConcurrency = Math.max(1, Math.min(64, Math.round(args.maxConcurrency ?? 2)));
@@ -157,6 +161,7 @@ export class DeployService {
       lines,
       maxConcurrency: args.maxConcurrency,
       budgetLimit: args.budgetLimit ?? null,
+      fbPage: args.fbPage ?? null,
     });
     const jobs = Number(this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM video_batch_jobs WHERE batch_id = ?", created.batch.id)?.n ?? 0);
     if (jobs !== items.length) throw new AppError("DEPLOY_COUNT_MISMATCH", `Lỗi nội bộ: ${items.length} prompt nhưng tạo ${jobs} job.`, 500);

@@ -94,6 +94,7 @@ export class ChatService {
       "4. Không bịa: chỉ báo những gì tool trả về.",
       "5. Trước khi chọn thông số, kiểm khả năng model bằng video_get_provider_capabilities. Model không hỗ trợ thời lượng/tỷ lệ → nói rõ và đề xuất phương án.",
       "6. Người dùng nói 'triển khai' / 'làm video từ bộ prompt này' → gọi video_deploy_prompt_set với promptSetId: MỖI PROMPT = 1 VIDEO (N prompt → N video), không nhân bản. Nếu ngay từ đầu người dùng yêu cầu 'sinh N prompt → triển khai luôn' thì sinh xong gọi video_deploy_prompt_set ngay. Provider miễn phí chạy luôn; provider tính phí dừng ở CHỜ DUYỆT, nêu số video + chi phí.",
+      "7. Nếu video_list_fb_pages cho thấy đã có Page Facebook: TRƯỚC khi gọi video_create_batch / video_deploy_prompt_set (không phải dryRun) phải HỎI người dùng muốn đăng lên Page nào hoặc không đăng lên Facebook; không tự chọn. Truyền id Page vào fbPage ('none' = không đăng). Server từ chối nếu thiếu.",
       `Chế độ: ${mode === "manual" ? "THỦ CÔNG - dùng đúng skill/provider/model người dùng đã chọn, không tự đổi." : "TỰ ĐỘNG - tự chọn skill phù hợp từ danh mục và provider/model trong số đang bật."}`,
       opts.providerConfigId ? `Provider người dùng chọn: ${opts.providerConfigId}${opts.modelId ? `, model ${opts.modelId}` : ""}.` : "",
       `Provider đang bật: ${providers.map((p) => `${p.id} (${p.name}, ${p.status}, model: ${p.capabilities.models.map((m) => m.modelId).join("/")}, giá: ${p.capabilities.pricing})`).join("; ") || "chưa có"}.`,

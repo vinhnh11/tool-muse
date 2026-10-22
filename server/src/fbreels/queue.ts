@@ -1,6 +1,6 @@
 import type { AppContext } from "../context.ts";
 import { AppError, newId, nowIso } from "../util.ts";
-import { getReelsConfig, getReelsPause, type ReelsPause } from "./config.ts";
+import { getPublishPage, pageName, parsePause, type ReelsPause } from "./config.ts";
 import { checkReelEligibility } from "./eligibility.ts";
 
 /** removed = người dùng đã xoá khỏi hàng (dòng giữ lại làm dấu để sweepMissing không xếp lại) */
@@ -22,6 +22,8 @@ export interface ReelPostRow {
   workspace_id: string;
   asset_id: string;
   job_id: string | null;
+  /** id nội bộ fb_pages.id: Page đích của mục này, cố định từ lúc xếp hàng */
+  fb_page_id: string | null;
   status: ReelStatusCode;
   caption: string | null;
   skip_reason: string | null;
@@ -54,25 +56,37 @@ interface AssetInfo {
 
 const ASSET_COLS = "id, workspace_id, kind, file_name, mime, size_bytes, duration_sec, width, height, source_job_id, created_at";
 
+/** Page đích của video: batch của job tạo ra video → video_batches.fb_page_id (NULL/'none' = không đăng) */
+function targetPageOf(ctx: AppContext, jobId: string | null): string | null {
+  if (!jobId) return null;
+  const r = ctx.db.get<{ fb_page_id: string | null }>("SELECT b.fb_page_id FROM video_batch_jobs j JOIN video_batches b ON b.id = j.batch_id WHERE j.id = ?", jobId);
+  const v = r?.fb_page_id ?? null;
+  return v && v !== "none" ? v : null;
+}
+
 /**
- * Xếp video vừa xong vào hàng đăng. Idempotent (UNIQUE asset_id). Chưa cấu hình Facebook hoặc đang tắt tự động đăng thì bỏ qua.
+ * Xếp video vừa xong vào hàng đăng của ĐÚNG Page mà batch đã chọn. Idempotent (UNIQUE asset_id).
+ * Batch không chọn Page / chọn "Không đăng" / Page đã xoá hoặc tắt tự động đăng thì bỏ qua. Video không thuộc batch nào cũng không đăng.
  * Trả true nếu có dòng mới.
  */
 export function enqueueReel(ctx: AppContext, assetId: string): boolean {
   const a = ctx.db.get<AssetInfo>(`SELECT ${ASSET_COLS} FROM video_assets WHERE id = ?`, assetId);
   if (!a || a.kind !== "generated") return false;
-  const cfg = getReelsConfig(ctx, a.workspace_id);
-  if (!cfg.autoEnabled || !cfg.tokenConfigured || !cfg.pageId) return false;
+  const pageRowId = targetPageOf(ctx, a.source_job_id);
+  if (!pageRowId) return false;
+  const page = getPublishPage(ctx, pageRowId);
+  if (!page || page.workspace_id !== a.workspace_id || !page.auto_enabled) return false;
   const el = checkReelEligibility({ durationSec: a.duration_sec, width: a.width, height: a.height, mime: a.mime, fileName: a.file_name, sizeBytes: a.size_bytes });
   const now = nowIso();
-  const status: ReelStatusCode = !el.ok ? "skipped" : cfg.requireApproval ? "pending_review" : "approved";
+  const status: ReelStatusCode = !el.ok ? "skipped" : page.require_approval ? "pending_review" : "approved";
   const r = ctx.db.run(
-    `INSERT OR IGNORE INTO fb_reel_posts (id, workspace_id, asset_id, job_id, status, skip_reason, approved_by, approved_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO fb_reel_posts (id, workspace_id, asset_id, job_id, fb_page_id, status, skip_reason, approved_by, approved_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     newId("fbr"),
     a.workspace_id,
     a.id,
     a.source_job_id,
+    page.id,
     status,
     el.ok ? null : el.reason,
     status === "approved" ? "auto" : null,
@@ -83,17 +97,19 @@ export function enqueueReel(ctx: AppContext, assetId: string): boolean {
   return r.changes > 0;
 }
 
-/** Quét video 'generated' đã xong nhưng chưa vào hàng (bị lỡ móc), chỉ video tạo sau mốc bật tính năng */
-export function sweepMissing(ctx: AppContext, ws: string): number {
-  const cfg = getReelsConfig(ctx, ws);
-  if (!cfg.autoEnabled || !cfg.enabledSince || !cfg.tokenConfigured || !cfg.pageId) return 0;
+/** Quét video 'generated' của các batch chọn Page này, đã xong nhưng chưa vào hàng (bị lỡ móc), chỉ video tạo sau mốc bật tự đăng của Page */
+export function sweepMissing(ctx: AppContext, pageRowId: string): number {
+  const page = getPublishPage(ctx, pageRowId);
+  if (!page || !page.auto_enabled || !page.enabled_since) return 0;
   const rows = ctx.db.all<{ id: string }>(
     `SELECT a.id FROM video_assets a JOIN video_batch_jobs j ON j.id = a.source_job_id AND j.status = 'completed' AND j.output_asset_id = a.id
+     JOIN video_batches b ON b.id = j.batch_id AND b.fb_page_id = ?
      WHERE a.workspace_id = ? AND a.kind = 'generated' AND a.created_at >= ?
        AND NOT EXISTS (SELECT 1 FROM fb_reel_posts p WHERE p.asset_id = a.id)
      ORDER BY a.created_at`,
-    ws,
-    cfg.enabledSince,
+    page.id,
+    page.workspace_id,
+    page.enabled_since,
   );
   let n = 0;
   for (const r of rows) if (enqueueReel(ctx, r.id)) n++;
@@ -103,6 +119,8 @@ export function sweepMissing(ctx: AppContext, ws: string): number {
 export interface ReelItem {
   id: string;
   assetId: string;
+  pageId: string | null;
+  pageName: string | null;
   status: ReelStatusCode;
   statusLabel: string;
   title: string;
@@ -122,18 +140,29 @@ export interface ReelItem {
   createdAt: string;
 }
 
-export function listQueue(ctx: AppContext, ws: string, status?: string): { items: ReelItem[]; pause: ReelsPause | null } {
+export function listQueue(ctx: AppContext, ws: string, f: { status?: string; pageId?: string } = {}): { items: ReelItem[]; pauses: Record<string, ReelsPause> } {
+  const { status, pageId } = f;
+  const params: string[] = [ws];
+  if (status) params.push(status);
+  if (pageId) params.push(pageId);
   const rows = ctx.db.all<ReelPostRow & { file_name: string; duration_sec: number | null; width: number | null; height: number | null; thumbnail_path: string | null; title: string | null; prompt: string | null }>(
     `SELECT p.*, a.file_name, a.duration_sec, a.width, a.height, a.thumbnail_path, j.title, j.prompt
      FROM fb_reel_posts p JOIN video_assets a ON a.id = p.asset_id LEFT JOIN video_batch_jobs j ON j.id = p.job_id
-     WHERE p.workspace_id = ? AND p.status <> 'removed' ${status ? "AND p.status = ?" : ""} ORDER BY p.created_at DESC LIMIT 500`,
-    ...(status ? [ws, status] : [ws]),
+     WHERE p.workspace_id = ? AND p.status <> 'removed' ${status ? "AND p.status = ?" : ""} ${pageId ? "AND p.fb_page_id = ?" : ""} ORDER BY p.created_at DESC LIMIT 500`,
+    ...params,
   );
+  const pauses: Record<string, ReelsPause> = {};
+  for (const pg of ctx.db.all<{ id: string; pause_json: string | null }>("SELECT id, pause_json FROM fb_pages WHERE workspace_id = ? AND deleted_at IS NULL AND pause_json IS NOT NULL", ws)) {
+    const p = parsePause(pg.pause_json);
+    if (p) pauses[pg.id] = p;
+  }
   return {
-    pause: getReelsPause(ctx, ws),
+    pauses,
     items: rows.map((r) => ({
       id: r.id,
       assetId: r.asset_id,
+      pageId: r.fb_page_id,
+      pageName: pageName(ctx, r.fb_page_id),
       status: r.status,
       statusLabel: STATUS_LABEL[r.status] ?? r.status,
       title: r.title || r.file_name,
@@ -183,6 +212,8 @@ export function reject(ctx: AppContext, ws: string, id: string): void {
 export function retry(ctx: AppContext, ws: string, id: string, userId: string): void {
   const r = getPost(ctx, ws, id);
   if (!["failed", "skipped", "rejected"].includes(r.status)) throw conflict("đăng lại", r);
+  const page = r.fb_page_id ? getPublishPage(ctx, r.fb_page_id) : undefined;
+  if (!page) throw new AppError("FB_PAGE_GONE", "Page của mục này đã bị xoá, không thể đăng lại.", 409);
   const a = ctx.db.get<AssetInfo>(`SELECT ${ASSET_COLS} FROM video_assets WHERE id = ?`, r.asset_id);
   const el = a ? checkReelEligibility({ durationSec: a.duration_sec, width: a.width, height: a.height, mime: a.mime, fileName: a.file_name, sizeBytes: a.size_bytes }) : ({ ok: false, reason: "Video không còn tồn tại." } as const);
   if (!el.ok) {
@@ -191,7 +222,7 @@ export function retry(ctx: AppContext, ws: string, id: string, userId: string): 
   }
   const now = nowIso();
   // Video từng bị từ chối mà đang bắt buộc duyệt thì phải qua bước duyệt lại
-  const needReview = r.status === "rejected" && getReelsConfig(ctx, ws).requireApproval;
+  const needReview = r.status === "rejected" && Boolean(page.require_approval);
   const ch = ctx.db.run(
     "UPDATE fb_reel_posts SET status = ?, skip_reason = NULL, error_message = NULL, fb_video_id = NULL, fb_post_id = NULL, step = NULL, approved_by = ?, approved_at = ?, updated_at = ? WHERE id = ? AND status = ?",
     needReview ? "pending_review" : "approved",

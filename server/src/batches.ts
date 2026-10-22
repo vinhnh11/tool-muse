@@ -2,6 +2,7 @@ import type { AppContext } from "./context.ts";
 import { audit, eventToPublic, recordEvent, type EventRow } from "./events.ts";
 import type { CostEstimate, GenerationInput, GenerationMode, ValidationIssue } from "./providers/types.ts";
 import { checkList, type ParsedLine, type PromptDraft } from "./prompts.ts";
+import { pageName, resolveFbTarget } from "./fbreels/config.ts";
 import { AppError, durationFromPrompt, newId, nowIso, safeJsonParse } from "./util.ts";
 
 export const JOB_STATUSES = ["draft", "awaiting_approval", "queued", "waiting_for_capacity", "submitting", "processing", "completed", "failed", "cancelled"] as const;
@@ -95,6 +96,8 @@ export interface BatchRow {
   approved_at: string | null;
   approved_max_cost: number | null;
   created_by: string | null;
+  /** NULL = không có Page nào lúc tạo; 'none' = chọn rõ không đăng; còn lại = fb_pages.id */
+  fb_page_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -306,8 +309,12 @@ export class BatchService {
       lines?: (number | null)[];
       maxConcurrency?: number;
       budgetLimit?: number | null;
+      /** Đăng lên Page: id Page Facebook đã cấu hình | "none" (không đăng). BẮT BUỘC khi đã có >=1 Page */
+      fbPage?: string | null;
     },
   ): { batch: BatchRow; check: BatchCheck; estimate: BatchEstimate } {
+    // Luật ép chọn Page nằm ở đây (điểm nghẽn duy nhất của mọi đường tạo batch: API, deploy, tool, MCP, chat)
+    const fbTarget = resolveFbTarget(this.ctx, workspaceId, args.fbPage);
     const config = defaultBatchConfig(args.config);
     // Thời lượng nghe theo prompt: prompt ghi "dài N giây" thì job đó dùng N (nếu model hỗ trợ), không thì theo cấu hình
     {
@@ -333,8 +340,8 @@ export class BatchService {
     this.db.tx(() => {
       this.db.run(
         `INSERT INTO video_batches (id, workspace_id, session_id, name, mode, prompt_set_id, provider_config_id, model_id, config_json, max_concurrency, status,
-           budget_limit, estimate_json, estimated_cost, actual_cost, currency, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_approval', ?, ?, ?, NULL, ?, ?, ?, ?)`,
+           budget_limit, estimate_json, estimated_cost, actual_cost, currency, created_by, fb_page_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_approval', ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
         batchId,
         workspaceId,
         args.sessionId ?? null,
@@ -350,6 +357,7 @@ export class BatchService {
         estimate.total,
         estimate.currency,
         actor.userId,
+        fbTarget,
         now,
         now,
       );
@@ -823,6 +831,7 @@ export class BatchService {
       counts,
       total,
       progress: total ? Math.round((done / total) * 100) : 0,
+      fbPage: b.fb_page_id === "none" ? ("none" as const) : b.fb_page_id ? { id: b.fb_page_id, name: pageName(this.ctx, b.fb_page_id) ?? "(Page đã xoá)" } : null,
       createdAt: b.created_at,
       updatedAt: b.updated_at,
     };

@@ -6,6 +6,7 @@ import path from "node:path";
 import { z, type ZodTypeAny } from "zod";
 import type { AppContext } from "./context.ts";
 import { BatchService, defaultBatchConfig, type Actor, type BatchConfig, type BatchPromptInput } from "./batches.ts";
+import { listPages } from "./fbreels/config.ts";
 import { DeployService } from "./deploy.ts";
 import { audit } from "./events.ts";
 import { ExportService } from "./exporter.ts";
@@ -189,11 +190,25 @@ export const TOOLS: ToolDef[] = [
     },
   }),
   def({
+    name: "video_list_fb_pages",
+    alias: "video.list_fb_pages",
+    description: "Liệt kê các Page Facebook đã cấu hình (chỉ đọc, không có token). Khi có Page, video_create_batch / video_deploy_prompt_set BẮT BUỘC có fbPage (id Page hoặc 'none') - hỏi người dùng muốn đăng lên Page nào hoặc không đăng.",
+    schema: z.object({}),
+    async handler(ctx, c) {
+      const pages = listPages(ctx, c.workspaceId);
+      return {
+        required: pages.length > 0,
+        pages: pages.map((p) => ({ id: p.id, name: p.name, pageId: p.pageId, tokenLast4: p.tokenLast4, autoEnabled: p.autoEnabled, paused: Boolean(p.pause) })),
+        note: pages.length ? "Hỏi người dùng đăng lên Page nào (hoặc không đăng), rồi truyền id vào fbPage ('none' = không đăng)." : "Chưa cấu hình Page nào: không cần fbPage.",
+      };
+    },
+  }),
+  def({
     name: "video_create_batch",
     alias: "video.create_batch",
     description:
       "Tạo batch video ở trạng thái CHỜ DUYỆT (không chạy, không tốn phí) kèm ước tính chi phí. Sau đó người dùng phải duyệt: trong ứng dụng bấm 'Duyệt & chạy'; agent ngoài chỉ gọi video_approve_batch SAU KHI người dùng đồng ý rõ ràng với con số chi phí.",
-    schema: z.object({ ...promptSourceSchema, name: z.string().optional(), providerConfigId: z.string().optional(), modelId: z.string().optional(), config: batchConfigSchema.optional(), maxConcurrency: z.number().int().min(1).max(64).optional(), budgetLimit: z.number().nullable().optional() }),
+    schema: z.object({ ...promptSourceSchema, name: z.string().optional(), providerConfigId: z.string().optional(), modelId: z.string().optional(), config: batchConfigSchema.optional(), maxConcurrency: z.number().int().min(1).max(64).optional(), budgetLimit: z.number().nullable().optional(), fbPage: z.string().optional().describe("Đăng lên Page Facebook: id Page (lấy từ video_list_fb_pages) hoặc 'none' = không đăng lên Facebook. BẮT BUỘC khi đã có Page - hãy HỎI người dùng, không tự chọn") }),
     async handler(ctx, c, a) {
       const pick = pickProvider(ctx, c.workspaceId, a.providerConfigId, a.modelId);
       const { prompts, promptSetId } = resolvePrompts(ctx, c.workspaceId, a);
@@ -207,6 +222,7 @@ export const TOOLS: ToolDef[] = [
         prompts,
         maxConcurrency: a.maxConcurrency,
         budgetLimit: a.budgetLimit ?? null,
+        fbPage: a.fbPage ?? null,
       });
       return {
         batchId: r.batch.id,
@@ -246,6 +262,7 @@ export const TOOLS: ToolDef[] = [
       name: z.string().optional(),
       maxConcurrency: z.number().int().min(1).max(64).optional(),
       budgetLimit: z.number().nullable().optional(),
+      fbPage: z.string().optional().describe("Đăng lên Page Facebook: id Page (lấy từ video_list_fb_pages) hoặc 'none' = không đăng lên Facebook. BẮT BUỘC khi đã có Page - hãy HỎI người dùng, không tự chọn"),
       dryRun: z.boolean().optional(),
       confirm: z.boolean().optional(),
       approvedMaxCost: z.number().nullable().optional(),
@@ -265,6 +282,7 @@ export const TOOLS: ToolDef[] = [
         budgetLimit: a.budgetLimit ?? null,
         dryRun: a.dryRun,
         run,
+        fbPage: a.fbPage ?? null,
         autoRunIfFree: true,
       });
       const est = { total: r.estimate.total, currency: r.estimate.currency, kind: r.estimate.kind, effectiveConcurrency: r.estimate.effectiveConcurrency, notes: r.estimate.notes };
