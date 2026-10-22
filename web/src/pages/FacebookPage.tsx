@@ -9,6 +9,7 @@ import { Field, Input, Select, TextArea, Toggle } from "../components/Field";
 import { toastApiError, useToast } from "../components/Toast";
 import { useApi, usePoll } from "../hooks/useApi";
 import { FB_REEL_STATUS_META, fmtDate, fmtSeconds, truncate } from "../labels";
+import { validateShopeeUrl } from "./batch/shopeeUrl";
 
 /** Cài đặt CHUNG: áp dụng cho mọi Page (mẫu caption, AI caption, phiên bản Graph) */
 function SharedSettingsCard({ settings, onSaved }: { settings: FbSettings; onSaved: (s: FbSettings) => void }) {
@@ -308,6 +309,15 @@ function QueueCard({ refreshKey, pages }: { refreshKey: number; pages: FbPage[] 
     if (ok) await act(it, () => api.fbReelsApprove(it.id), "Đã duyệt");
   };
 
+  /** Sửa link Shopee của MỘT bài đang chờ duyệt (rỗng = bỏ link). Server kiểm lại. */
+  const editLink = async (it: FbReelItem) => {
+    const v = window.prompt("Link Shopee của video này (để trống = không gắn link):", it.shopeeUrl ?? "");
+    if (v === null) return;
+    const err = validateShopeeUrl(v);
+    if (err) return toast.error("Link Shopee không hợp lệ", err);
+    await act(it, () => api.fbReelsSetShopeeUrl(it.id, v.trim() || null), "Đã cập nhật link Shopee");
+  };
+
   const items = q.data?.items ?? [];
   return (
     <section className="card">
@@ -332,6 +342,7 @@ function QueueCard({ refreshKey, pages }: { refreshKey: number; pages: FbPage[] 
                 <th>Page</th>
                 <th>Thời lượng</th>
                 <th>Trạng thái</th>
+                <th>Link Shopee / Bình luận</th>
                 <th>Ghi chú</th>
                 <th>Thao tác</th>
               </tr>
@@ -357,6 +368,23 @@ function QueueCard({ refreshKey, pages }: { refreshKey: number; pages: FbPage[] 
                     <td>
                       <Badge tone={m.tone}>{m.label}</Badge>
                     </td>
+                    <td className="small">
+                      {it.shopeeUrl ? (
+                        <a href={it.shopeeUrl} target="_blank" rel="noopener noreferrer" title={it.shopeeUrl}>
+                          🛒 {truncate(it.shopeeUrl.replace(/^https:\/\//, ""), 28)}
+                        </a>
+                      ) : (
+                        "—"
+                      )}
+                      {it.shopeeUrl && it.commentStatus === "pending" ? <div className="muted tiny">Chưa bình luận</div> : null}
+                      {it.commentStatus === "done" ? <Badge tone="success">Đã bình luận</Badge> : null}
+                      {it.commentStatus === "failed" ? (
+                        <div title={it.commentError ?? ""}>
+                          <Badge tone="danger">Lỗi bình luận</Badge>
+                          <div className="muted tiny">{truncate(it.commentError ?? "", 140)}</div>
+                        </div>
+                      ) : null}
+                    </td>
                     <td className="small">{truncate(note, 160)}</td>
                     <td>
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -368,11 +396,19 @@ function QueueCard({ refreshKey, pages }: { refreshKey: number; pages: FbPage[] 
                             <Button size="sm" disabled={busy} onClick={() => void act(it, () => api.fbReelsReject(it.id), "Đã từ chối")}>
                               Từ chối
                             </Button>
+                            <Button size="sm" disabled={busy} onClick={() => void editLink(it)}>
+                              Sửa link
+                            </Button>
                           </>
                         ) : null}
                         {["failed", "skipped", "rejected"].includes(it.status) ? (
                           <Button size="sm" disabled={busy} onClick={() => void act(it, () => api.fbReelsRetry(it.id), "Đã đưa lại vào hàng đăng")}>
                             Đăng lại
+                          </Button>
+                        ) : null}
+                        {it.status === "published" && it.commentStatus === "failed" ? (
+                          <Button size="sm" disabled={busy} onClick={() => void act(it, () => api.fbReelsCommentRetry(it.id), "Đã xếp lại bình luận, sẽ thử trong ít phút")}>
+                            Thử bình luận lại
                           </Button>
                         ) : null}
                         {it.status !== "publishing" ? (

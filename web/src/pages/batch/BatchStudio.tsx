@@ -15,7 +15,7 @@ import { AiGenerateForm } from "./AiGenerateForm";
 import { BatchesSection } from "./BatchesSection";
 import { DeployDialog } from "./DeployDialog";
 import { FileImport, LineCounter, LIST_PLACEHOLDER, MakeSetButton, type CreateTab } from "./CreateArea";
-import { FbPageSelect, useFbPages } from "./FbPageSelect";
+import { FB_NONE, FbPageSelect, ShopeeUrlField, shopeeError, useFbPages } from "./FbPageSelect";
 import { PromptSetPanel } from "./PromptSetPanel";
 import { useVideoConfig } from "./useVideoConfig";
 import { ReferencePicker, VideoConfigPanel } from "./VideoConfigPanel";
@@ -175,6 +175,7 @@ export function BatchStudio() {
       blankLines: src.blankLines,
       lines: src.lines,
       fbPage: fb.toRequest(fbPage),
+      shopeeUrl: fbPage && fbPage !== FB_NONE && shopeeUrl.trim() ? shopeeUrl.trim() : undefined,
     };
   };
 
@@ -274,7 +275,9 @@ export function BatchStudio() {
 
   const fb = useFbPages();
   const [fbPage, setFbPage] = useState("");
-  const fbReady = fb.isReady(fbPage);
+  const [shopeeUrl, setShopeeUrl] = useState("");
+  const hasPage = Boolean(fbPage) && fbPage !== FB_NONE;
+  const fbReady = fb.isReady(fbPage) && !(hasPage && shopeeError(shopeeUrl));
   const canAct = Boolean(cfg.provider && cfg.model) && !busy;
 
   // Bộ prompt vừa sinh đã tải xong → mở triển khai (Mock chạy luôn, provider tính phí vẫn hỏi chi phí)
@@ -352,7 +355,8 @@ export function BatchStudio() {
             <Field label="Tên batch (tùy chọn)">
               <Input value={batchName} onChange={(e) => setBatchName(e.target.value)} placeholder="vd: Serum - đợt 1" />
             </Field>
-            <FbPageSelect pages={fb.pages} value={fbPage} onChange={setFbPage} disabled={Boolean(busy)} />
+            <FbPageSelect pages={fb.pages} value={fbPage} onChange={(v) => { setFbPage(v); if (!v || v === FB_NONE) setShopeeUrl(""); }} disabled={Boolean(busy)} />
+            {hasPage ? <ShopeeUrlField value={shopeeUrl} onChange={setShopeeUrl} disabled={Boolean(busy)} /> : null}
             <div className="action-buttons">
               <Button icon={<ShieldCheck size={15} />} loading={busy === "check"} disabled={!canAct} onClick={() => void runEstimate("check")}>
                 Kiểm tra prompt
@@ -361,7 +365,7 @@ export function BatchStudio() {
                 Ước tính chi phí
               </Button>
             </div>
-            <Button variant="primary" size="lg" block icon={<Rocket size={16} />} loading={busy === "create"} disabled={!canAct || !fbReady} title={fbReady ? undefined : "Chọn Page đăng Facebook (hoặc “Không đăng lên Facebook”) trước"} onClick={() => void createBatch()}>
+            <Button variant="primary" size="lg" block icon={<Rocket size={16} />} loading={busy === "create"} disabled={!canAct || !fbReady} title={fbReady ? undefined : "Chọn Page đăng Facebook (hoặc “Không đăng lên Facebook”) và kiểm tra link Shopee trước"} onClick={() => void createBatch()}>
               Tạo batch
             </Button>
             <p className="muted tiny">Tạo batch chỉ lưu ở trạng thái “Chờ duyệt” - chưa gọi provider, chưa tốn phí cho tới khi bạn bấm “Duyệt & chạy”.</p>

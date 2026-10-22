@@ -404,6 +404,7 @@ export interface Batch {
   progress: number;
   /** null = không có Page nào lúc tạo; "none" = chọn rõ không đăng */
   fbPage?: "none" | { id: string; name: string } | null;
+  shopeeUrl?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -423,6 +424,8 @@ export interface BatchRequest {
   lines?: (number | null)[];
   /** id Page Facebook | "none". Bắt buộc khi đã có Page */
   fbPage?: string;
+  /** Link Shopee sản phẩm (tuỳ chọn, chỉ khi chọn một Page) */
+  shopeeUrl?: string;
 }
 
 export interface CostConfirm {
@@ -658,6 +661,11 @@ export interface FbReelItem {
   errorMessage: string | null;
   caption: string | null;
   fbVideoId: string | null;
+  shopeeUrl: string | null;
+  commentStatus: "none" | "pending" | "done" | "failed";
+  commentError: string | null;
+  fbCommentId: string | null;
+  commentAttempts: number;
   attempts: number;
   approvedAt: string | null;
   publishedAt: string | null;
@@ -689,6 +697,8 @@ export const api = {
   fbReelsApprove: (id: string) => post<FbReelItem>(`/api/facebook/reels/queue/${enc(id)}/approve`),
   fbReelsReject: (id: string) => post<{ ok: boolean }>(`/api/facebook/reels/queue/${enc(id)}/reject`),
   fbReelsRetry: (id: string) => post<{ ok: boolean }>(`/api/facebook/reels/queue/${enc(id)}/retry`),
+  fbReelsCommentRetry: (id: string) => post<{ ok: boolean }>(`/api/facebook/reels/queue/${enc(id)}/comment-retry`),
+  fbReelsSetShopeeUrl: (id: string, shopeeUrl: string | null) => put<FbReelItem>(`/api/facebook/reels/queue/${enc(id)}/shopee-url`, { shopeeUrl }),
   fbReelsRemove: (id: string) => del<{ ok: boolean }>(`/api/facebook/reels/queue/${enc(id)}`),
   llmSettings: () => get<LlmSettings>("/api/settings/llm"),
   saveLlmSettings: (body: Partial<Omit<LlmSettings, "hasApiKey" | "updatedAt">> & { apiKey?: string | null }) => put<LlmSettings>("/api/settings/llm", body),
