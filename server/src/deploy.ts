@@ -1,5 +1,6 @@
 import type { AppContext } from "./context.ts";
-import { BatchService, defaultBatchConfig, type Actor, type BatchCheck, type BatchConfig, type BatchEstimate, type BatchPromptInput } from "./batches.ts";
+import { BatchService, defaultBatchConfig, defaultImageConfig, type Actor, type BatchCheck, type BatchConfig, type BatchEstimate, type BatchPromptInput, type ImageBatchConfig } from "./batches.ts";
+import { IMAGE_CONCURRENCY, IMAGE_MODEL_ID, isImageCapable } from "./providers/types.ts";
 import { resolveFbTarget } from "./fbreels/config.ts";
 import { PromptService } from "./promptgen.ts";
 import { AppError } from "./util.ts";
@@ -23,7 +24,7 @@ export interface DeployArgs {
   sessionId?: string | null;
   providerConfigId?: string | null;
   modelId?: string | null;
-  config?: Partial<BatchConfig>;
+  config?: Partial<BatchConfig> | Partial<ImageBatchConfig>;
   /** auto = prompt đã duyệt nếu có, không thì mọi prompt chưa bị loại */
   selection?: DeploySelection;
   /** Giữ thời lượng/tỷ lệ riêng của từng prompt (mặc định có) */
@@ -34,7 +35,7 @@ export interface DeployArgs {
   budgetLimit?: number | null;
   name?: string;
   dryRun?: boolean;
-  run?: { confirm: boolean; approvedMaxCost?: number | null; acknowledgeUnknownCost?: boolean } | null;
+  run?: { confirm: boolean; approvedMaxCost?: number | null; acknowledgeUnknownCost?: boolean; confirmLarge?: boolean } | null;
   autoRunIfFree?: boolean;
   /** Đăng lên Page: id Page | "none". Bắt buộc khi tạo thật và đã có >=1 Page (dryRun không ép) */
   fbPage?: string | null;
@@ -104,8 +105,53 @@ export class DeployService {
     return { providerConfigId: p.id, modelId };
   }
 
+  /** Provider cho batch ảnh: phải là provider đang bật làm được ảnh (muse2api) */
+  private imageTarget(workspaceId: string, params: Record<string, unknown>, args: DeployArgs): { providerConfigId: string; modelId: string } {
+    const enabled = this.ctx.providers.list(workspaceId).filter((p) => p.enabled);
+    const capable = enabled.filter((p) => isImageCapable(this.ctx.providers.adapter(p.providerType)));
+    const p = args.providerConfigId ? capable.find((x) => x.id === args.providerConfigId) : (typeof params.providerConfigId === "string" ? capable.find((x) => x.id === params.providerConfigId) : undefined) ?? capable.find((x) => x.status === "active") ?? capable[0];
+    if (!p) throw new AppError("NO_IMAGE_PROVIDER", "Chưa có provider Muse (muse2api) nào đang bật để tạo ảnh (trang Provider).", 409);
+    return { providerConfigId: p.id, modelId: IMAGE_MODEL_ID };
+  }
+
+  /** Bộ prompt ẢNH → batch ảnh (mỗi prompt × variantsPerPrompt ảnh). Không Facebook/Shopee. */
+  private deployImage(workspaceId: string, actor: Actor, set: ReturnType<PromptService["getSet"]>, args: DeployArgs): DeployResult {
+    const selection: DeploySelection = args.selection ?? "auto";
+    const items = selectDeployItems(set.items as SetItem[], selection);
+    if (!items.length) throw new AppError("NO_PROMPTS", "Bộ prompt không còn prompt nào để triển khai (đã loại hết hoặc chưa duyệt).", 400);
+    const params = (set.params ?? {}) as Record<string, unknown>;
+    const { providerConfigId, modelId } = this.imageTarget(workspaceId, params, args);
+    const cfgIn = { ...(args.config ?? {}) } as Partial<ImageBatchConfig>;
+    if (cfgIn.aspectRatio === undefined && typeof params.aspectRatio === "string") cfgIn.aspectRatio = params.aspectRatio;
+    const prompts: BatchPromptInput[] = items.map((i) => ({ prompt: i.prompt, title: i.title || undefined, aspectRatio: args.useItemOverrides !== false ? i.aspectRatio : null, referenceAssetIds: i.referenceAssetIds?.length ? i.referenceAssetIds : undefined, promptItemId: i.id }));
+    const lines = items.map((i) => i.index);
+    const maxConcurrency = args.maxConcurrency ?? IMAGE_CONCURRENCY.default;
+    const base = { dryRun: Boolean(args.dryRun), promptSetId: set.id, promptSetName: set.name, selection, promptCount: items.length, promptIndexes: lines, providerConfigId, modelId, free: false };
+    if (args.dryRun) {
+      const full = defaultImageConfig(cfgIn);
+      const check = this.batches.check(workspaceId, { providerConfigId, modelId, config: full, prompts, lines, kind: "image" });
+      const estimate = this.batches.estimateImage(workspaceId, { providerConfigId, imageCount: check.jobCount, maxConcurrency });
+      return { ...base, videoCount: check.jobCount, check, estimate, batch: null, approved: false, approveError: null };
+    }
+    const created = this.batches.createBatch(workspaceId, actor, { kind: "image", sessionId: args.sessionId !== undefined ? args.sessionId : set.sessionId, name: args.name?.trim() || `Ảnh: ${set.name}`.slice(0, 120), mode: set.source === "ai" ? "ai" : "list", promptSetId: set.id, providerConfigId, modelId, config: cfgIn as Partial<BatchConfig>, prompts, lines, maxConcurrency });
+    const jobs = Number(this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM video_batch_jobs WHERE batch_id = ?", created.batch.id)?.n ?? 0);
+    let approved = false;
+    let approveError: DeployResult["approveError"] = null;
+    if (args.run?.confirm) {
+      try {
+        this.batches.approveBatch(workspaceId, actor, created.batch.id, { confirm: true, approvedMaxCost: args.run.approvedMaxCost ?? null, acknowledgeUnknownCost: args.run.acknowledgeUnknownCost === true, confirmLarge: args.run.confirmLarge === true });
+        approved = true;
+      } catch (e) {
+        const err = e as AppError;
+        approveError = { code: err.code ?? "ERROR", message: err.message };
+      }
+    }
+    return { ...base, videoCount: jobs, check: created.check, estimate: created.estimate, batch: this.batches.batchToPublic(this.batches.getBatchRow(workspaceId, created.batch.id)), approved, approveError };
+  }
+
   deploy(workspaceId: string, actor: Actor, promptSetId: string, args: DeployArgs = {}): DeployResult {
     const set = this.prompts.getSet(workspaceId, promptSetId);
+    if (((set.params ?? {}) as { kind?: string }).kind === "image") return this.deployImage(workspaceId, actor, set, args);
     const selection: DeploySelection = args.selection ?? "auto";
     const items = selectDeployItems(set.items as SetItem[], selection);
     if (!items.length) {

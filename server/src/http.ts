@@ -9,7 +9,8 @@ import { ROOT_DIR } from "./config.ts";
 import type { AppContext } from "./context.ts";
 import * as auth from "./auth.ts";
 import { audit, eventToPublic, recordEvent, wake, type EventRow } from "./events.ts";
-import { BatchService, type Actor, type BatchConfig, type BatchPromptInput } from "./batches.ts";
+import { BatchService, defaultImageConfig, validateImageConfig, type Actor, type BatchConfig, type BatchPromptInput } from "./batches.ts";
+import { IMAGE_CONCURRENCY, IMAGE_MODEL_ID } from "./providers/types.ts";
 import { ChatService } from "./chat.ts";
 import { DeployService, type DeploySelection } from "./deploy.ts";
 import { ExportService } from "./exporter.ts";
@@ -546,6 +547,7 @@ export function createApp(ctx: AppContext): express.Express {
       const b = req.body ?? {};
       return prompts.generate(ws(req), actorOf(req), {
         sessionId: b.sessionId ?? null,
+        kind: b.kind === "image" ? "image" : "video",
         count: Number(b.count),
         durationSec: Number(b.durationSec),
         aspectRatio: String(b.aspectRatio),
@@ -567,7 +569,7 @@ export function createApp(ctx: AppContext): express.Express {
     h((req) => {
       const b = req.body ?? {};
       const sel = ["auto", "approved", "all"].includes(b.selection) ? (b.selection as DeploySelection) : "auto";
-      const run = b.run && typeof b.run === "object" ? { confirm: b.run.confirm === true, approvedMaxCost: num(b.run.approvedMaxCost) ?? null, acknowledgeUnknownCost: b.run.acknowledgeUnknownCost === true } : null;
+      const run = b.run && typeof b.run === "object" ? { confirm: b.run.confirm === true, approvedMaxCost: num(b.run.approvedMaxCost) ?? null, acknowledgeUnknownCost: b.run.acknowledgeUnknownCost === true, confirmLarge: b.run.confirmLarge === true } : null;
       return deployer.deploy(ws(req), actorOf(req), String(req.params.id), {
         sessionId: b.sessionId === undefined ? undefined : (b.sessionId ?? null),
         providerConfigId: b.providerConfigId ? String(b.providerConfigId) : null,
@@ -617,6 +619,15 @@ export function createApp(ctx: AppContext): express.Express {
     "/api/batches/estimate",
     h((req) => {
       const b = req.body ?? {};
+      if (b.kind === "image") {
+        const issues = validateImageConfig(b.config ?? {}, num(b.maxConcurrency) ?? IMAGE_CONCURRENCY.default);
+        if (issues.length) throw new AppError(issues[0]!.code, issues.map((i) => i.message).join(" "), 400, issues);
+        const icfg = defaultImageConfig(b.config ?? {});
+        const iprompts = (b.prompts ?? []) as BatchPromptInput[];
+        const check = batches.check(ws(req), { providerConfigId: String(b.providerConfigId), modelId: IMAGE_MODEL_ID, config: icfg, prompts: iprompts, blankLines: b.blankLines, lines: b.lines, kind: "image" });
+        const estimate = batches.estimateImage(ws(req), { providerConfigId: String(b.providerConfigId), imageCount: check.jobCount, maxConcurrency: num(b.maxConcurrency) ?? IMAGE_CONCURRENCY.default });
+        return { check, estimate };
+      }
       const config = defaultCfg(b.config);
       const args = { providerConfigId: String(b.providerConfigId), modelId: String(b.modelId), config, prompts: (b.prompts ?? []) as BatchPromptInput[] };
       const check = batches.check(ws(req), { ...args, blankLines: b.blankLines, lines: b.lines });
@@ -624,7 +635,7 @@ export function createApp(ctx: AppContext): express.Express {
       return { check, estimate };
     }),
   );
-  app.get("/api/batches", h((req) => ({ batches: batches.listBatches(ws(req), { sessionId: (req.query.sessionId as string) || null }) })));
+  app.get("/api/batches", h((req) => ({ batches: batches.listBatches(ws(req), { sessionId: (req.query.sessionId as string) || null, kind: kindQuery(req.query.kind) }) })));
   app.post(
     "/api/batches",
     h((req) => {
@@ -635,7 +646,8 @@ export function createApp(ctx: AppContext): express.Express {
         mode: b.mode ?? "list",
         promptSetId: b.promptSetId ?? null,
         providerConfigId: String(b.providerConfigId),
-        modelId: String(b.modelId),
+        modelId: String(b.modelId ?? ""),
+        kind: b.kind === "image" ? "image" : "video",
         config: b.config ?? {},
         prompts: b.prompts ?? [],
         blankLines: b.blankLines,
@@ -653,7 +665,22 @@ export function createApp(ctx: AppContext): express.Express {
     "/api/batches/:id/approve",
     h((req) => {
       const b = req.body ?? {};
-      return batches.batchToPublic(batches.approveBatch(ws(req), actorOf(req), String(req.params.id), { confirm: b.confirm === true, approvedMaxCost: num(b.approvedMaxCost) ?? null, acknowledgeUnknownCost: b.acknowledgeUnknownCost === true }));
+      return batches.batchToPublic(batches.approveBatch(ws(req), actorOf(req), String(req.params.id), { confirm: b.confirm === true, approvedMaxCost: num(b.approvedMaxCost) ?? null, acknowledgeUnknownCost: b.acknowledgeUnknownCost === true, confirmLarge: b.confirmLarge === true }));
+    }),
+  );
+  /** ZIP mọi file đã hoàn thành của batch (dùng cho batch ảnh) */
+  app.get(
+    "/api/batches/:id/zip",
+    h(async (req, res) => {
+      const id = String(req.params.id);
+      const b = batches.getBatchRow(ws(req), id);
+      const ids = ctx.db.all<{ output_asset_id: string }>("SELECT output_asset_id FROM video_batch_jobs WHERE batch_id = ? AND workspace_id = ? AND status = 'completed' AND output_asset_id IS NOT NULL ORDER BY seq", id, ws(req)).map((r) => r.output_asset_id);
+      if (!ids.length) throw new AppError("BATCH_EMPTY", "Batch chưa có ảnh nào hoàn thành.", 404);
+      const base = b.name.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 50) || "batch";
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(`${b.kind === "image" ? "anh" : "video"}-${base}-${Date.now()}.zip`)}`);
+      await exporter.zipAssets(ws(req), ids, res);
+      audit(ctx.db, { workspaceId: ws(req), userId: req.principal!.user.id, actor: actorOf(req).kind, action: "batch.zip", targetType: "batch", targetId: id, data: { count: ids.length } });
     }),
   );
   app.post("/api/batches/:id/concurrency", h((req) => batches.batchToPublic(batches.setMaxConcurrency(ws(req), actorOf(req), String(req.params.id), Number(req.body?.maxConcurrency)))));
@@ -697,7 +724,7 @@ export function createApp(ctx: AppContext): express.Express {
     "/api/jobs",
     h((req) => {
       const statuses = req.query.status ? String(req.query.status).split(",").filter(Boolean) : undefined;
-      return batches.listJobs(ws(req), { batchId: req.query.batchId as string | undefined, sessionId: req.query.sessionId as string | undefined, statuses, q: req.query.q as string | undefined, limit: num(req.query.limit), offset: num(req.query.offset) });
+      return batches.listJobs(ws(req), { batchId: req.query.batchId as string | undefined, sessionId: req.query.sessionId as string | undefined, statuses, q: req.query.q as string | undefined, limit: num(req.query.limit), offset: num(req.query.offset), kind: kindQuery(req.query.kind, "all") });
     }),
   );
   app.get("/api/jobs/:id", h((req) => batches.jobToPublic(batches.getJobRow(ws(req), String(req.params.id)))));
@@ -741,13 +768,27 @@ export function createApp(ctx: AppContext): express.Express {
   app.get(
     "/api/library",
     h((req) => {
-      const rows = ctx.db.all<Parameters<typeof ctx.storage.toPublic>[0] & { batch_id: string | null; batch_name: string | null; session_title: string | null; version: number | null; prompt: string | null }>(
-        `SELECT a.*, j.batch_id, b.name AS batch_name, s.title AS session_title, j.version, j.prompt FROM video_assets a
+      // Lọc loại TRƯỚC LIMIT. Mặc định video (giữ hành vi cũ); ảnh = ảnh do provider tạo (không lẫn ảnh tải lên)
+      const kind = kindQuery(req.query.kind);
+      const kindSql = kind === "image" ? "a.kind = 'image' AND a.origin = 'provider'" : kind === "all" ? "((a.kind = 'generated') OR (a.kind = 'image' AND a.origin = 'provider'))" : "a.kind = 'generated'";
+      const rows = ctx.db.all<Parameters<typeof ctx.storage.toPublic>[0] & { batch_id: string | null; batch_name: string | null; session_title: string | null; version: number | null; prompt: string | null; job_config: string | null }>(
+        `SELECT a.*, j.batch_id, b.name AS batch_name, s.title AS session_title, j.version, j.prompt, j.config_json AS job_config FROM video_assets a
          LEFT JOIN video_batch_jobs j ON j.id = a.source_job_id LEFT JOIN video_batches b ON b.id = j.batch_id LEFT JOIN studio_sessions s ON s.id = a.session_id
-         WHERE a.workspace_id = ? AND a.kind = 'generated' ${req.query.libraryOnly === "1" ? "AND a.in_library = 1" : ""} ORDER BY a.created_at DESC LIMIT 1000`,
+         WHERE a.workspace_id = ? AND ${kindSql} ${req.query.libraryOnly === "1" ? "AND a.in_library = 1" : ""} ORDER BY a.created_at DESC LIMIT 1000`,
         ws(req),
       );
-      return { items: rows.map((r) => ({ ...ctx.storage.toPublic(r), batchId: r.batch_id, batchName: r.batch_name, sessionTitle: r.session_title, version: r.version, prompt: r.prompt })) };
+      return {
+        items: rows.map((r) => ({
+          ...ctx.storage.toPublic(r),
+          kindOf: r.kind === "image" ? "image" : "video",
+          batchId: r.batch_id,
+          batchName: r.batch_name,
+          sessionTitle: r.session_title,
+          version: r.version,
+          prompt: r.prompt,
+          aspectRatio: r.job_config ? (JSON.parse(r.job_config) as { aspectRatio?: string }).aspectRatio ?? null : null,
+        })),
+      };
     }),
   );
   app.get("/api/audit", h((req) => ({ entries: ctx.db.all("SELECT id, user_id, actor, action, target_type, target_id, data_json, created_at FROM audit_log WHERE workspace_id = ? ORDER BY id DESC LIMIT 300", ws(req)) })));
@@ -819,6 +860,11 @@ export function createApp(ctx: AppContext): express.Express {
   });
 
   return app;
+}
+
+/** ?kind=video|image|all; mặc định theo `def` (video để giữ hành vi cũ) */
+function kindQuery(v: unknown, def: "video" | "all" = "video"): "video" | "image" | "all" {
+  return v === "image" || v === "video" || v === "all" ? v : def;
 }
 
 function defaultCfg(c: Partial<BatchConfig> | undefined): BatchConfig {

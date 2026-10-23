@@ -4,7 +4,7 @@ import { audit, recordEvent } from "./events.ts";
 import type { Actor } from "./batches.ts";
 import { checkList, toCsv, toTxt, type PromptDraft } from "./prompts.ts";
 import { AppError, newId, normalizeText, nowIso, safeJsonParse, similarity } from "./util.ts";
-import type { ModelCapabilities } from "./providers/types.ts";
+import { IMAGE_ASPECT_RATIOS, IMAGE_MODEL_ID, isImageCapable, type ModelCapabilities } from "./providers/types.ts";
 
 /**
  * BATCH PROMPT GENERATOR + quản lý bộ prompt (prompt_sets / prompt_items).
@@ -28,6 +28,10 @@ const HOOKS = ["câu hỏi gây tò mò", "vấn đề/nỗi đau trực diện"
 const STRUCTURES = ["hook → vấn đề → giải pháp → CTA", "hook → trình diễn tính năng → kết quả → CTA", "câu chuyện mini 3 hồi", "một cú máy liền (one-take)", "nhịp dựng nhanh theo beat", "so sánh A/B", "hướng dẫn từng bước", "lời chứng thực của người dùng"];
 const SETTINGS = ["studio nền tối, ánh sáng viền", "căn bếp gia đình buổi sáng", "ngoài trời giờ vàng", "phòng ngủ tối giản", "văn phòng hiện đại", "đường phố đô thị ban đêm", "phòng tắm sáng sủa", "quán cà phê ấm cúng", "bàn làm việc top-down", "thiên nhiên rộng mở"];
 
+// Ô ý tưởng cho prompt ẢNH: góc chụp × bối cảnh × phong cách (không có hook/nhịp thời gian)
+const IMAGE_ANGLES = ["cận cảnh chính diện", "góc 45° từ trên xuống", "top-down phẳng (flat lay)", "góc thấp hùng vỹ", "macro chi tiết chất liệu", "cầm trên tay (POV)", "đặt trên bục trưng bày", "lệch tâm theo quy tắc 1/3", "toàn cảnh có chiều sâu trường ảnh", "bóng đổ dài ngược sáng"];
+const IMAGE_STYLES = ["ảnh thương mại sạch, nền trơn", "lifestyle ấm áp tự nhiên", "tối giản màu pastel", "điện ảnh tương phản cao", "editorial tạp chí", "ánh sáng studio mềm", "mộc mạc chất liệu gỗ/vải", "tươi sáng màu rực", "sang trọng tông vàng-đen", "quảng cáo mùa lễ hội"];
+
 const itemSchema = z.object({
   slot: z.number().int(),
   title: z.string().min(1),
@@ -40,6 +44,8 @@ const chunkSchema = z.object({ items: z.array(itemSchema) });
 
 export interface GenerateArgs {
   sessionId?: string | null;
+  /** "image" = viết prompt cho model TẠO ẢNH (không thời lượng/chuyển động) */
+  kind?: "video" | "image";
   count: number;
   durationSec: number;
   aspectRatio: string;
@@ -280,7 +286,97 @@ export class PromptService {
 
   // ---------------------------------------------------------------- AI sinh prompt
 
+  /** Caps cho prompt ảnh: provider phải làm được ảnh */
+  private imageCaps(workspaceId: string, providerConfigId: string): ModelCapabilities {
+    const { config, adapter } = this.ctx.providers.resolveById(workspaceId, providerConfigId);
+    if (!isImageCapable(adapter)) throw new AppError("IMAGE_PROVIDER_UNSUPPORTED", "Provider này chưa hỗ trợ tạo ảnh - chọn provider Muse (muse2api).", 400);
+    const m = adapter.getImageModel(config);
+    return { modelId: m.modelId, label: m.label, verified: true, modes: [], durations: { min: 0, max: 0, auto: false }, aspectRatios: m.aspectRatios, resolutions: [], defaultResolution: "", audio: false, negativePrompt: false, maxPromptChars: m.maxPromptChars, maxReferenceImages: m.maxReferenceImages, qualityModes: [], seed: false, notes: m.notes };
+  }
+
+  /** Bộ prompt này viết cho ảnh? (đọc params_json, không thêm cột) */
+  private setIsImage(setId: string): boolean {
+    const r = this.ctx.db.get<{ params_json: string }>("SELECT params_json FROM prompt_sets WHERE id = ?", setId);
+    return (safeJsonParse<{ kind?: string }>(r?.params_json, {}).kind ?? "video") === "image";
+  }
+
+  private async generateImage(workspaceId: string, actor: Actor, args: GenerateArgs) {
+    const count = Math.round(args.count);
+    if (!Number.isFinite(count) || count < 1 || count > 10) throw new AppError("INVALID_COUNT", "AI chỉ sinh tối đa 10 prompt mỗi lần (prompt người dùng tự nhập/nhập file thì không giới hạn).", 400);
+    const caps = this.imageCaps(workspaceId, args.providerConfigId);
+    if (!(IMAGE_ASPECT_RATIOS as readonly string[]).includes(args.aspectRatio)) throw new AppError("INVALID_ASPECT", `Tỉ lệ khung hình "${args.aspectRatio}" không hợp lệ - chọn ${IMAGE_ASPECT_RATIOS.join(", ")}.`, 400);
+    const textModel = this.ctx.llm.model(workspaceId, "text");
+    const genres = (args.genres?.length ? args.genres : ["product"]).filter((g) => g);
+    const slots: { slot: number; genre: string; angle: string; setting: string; style: string }[] = [];
+    for (let i = 0; i < count; i++)
+      slots.push({ slot: i + 1, genre: genres[i % genres.length]!, angle: IMAGE_ANGLES[(i * 3 + Math.floor(i / IMAGE_ANGLES.length)) % IMAGE_ANGLES.length]!, setting: SETTINGS[(i * 5 + Math.floor(i / SETTINGS.length)) % SETTINGS.length]!, style: IMAGE_STYLES[(i * 7 + Math.floor(i / IMAGE_STYLES.length)) % IMAGE_STYLES.length]! });
+    const lang = args.language || "vi";
+    const system = [
+      "Bạn là art director viết prompt cho model TẠO ẢNH AI (ảnh tĩnh).",
+      `Model đích: ${caps.label}. Mỗi prompt ≤ ${Math.min(caps.maxPromptChars, 1500)} ký tự, khung ${args.aspectRatio}.`,
+      "Mô tả: chủ thể, bố cục, ống kính/góc máy, ánh sáng, chất liệu, bảng màu, phong cách, bối cảnh. KHÔNG viết thời lượng, chuyển động, mốc giây, âm thanh, lời thoại.",
+      "Không yêu cầu chữ/logo/watermark trong ảnh trừ khi brief nói rõ.",
+      `Ngôn ngữ prompt: ${lang === "en" ? "tiếng Anh" : "tiếng Việt"}. Tiêu đề và mục tiêu viết tiếng Việt.`,
+      "Mỗi prompt bám ĐÚNG ô ý tưởng được giao (góc chụp, bối cảnh, phong cách) để các prompt khác hẳn nhau.",
+      'Trả DUY NHẤT JSON {"items":[{"slot":number,"title":string,"objective":string,"prompt":string,"negative":string,"genre":string}]} - đủ mọi slot được giao, "negative" để rỗng.',
+    ].join("\n");
+    const context = {
+      brief: args.brief ?? "",
+      consistency: args.consistency ?? {},
+      reference_assets: args.referenceAssetIds?.length ? "1 ảnh sản phẩm tham chiếu sẽ được gửi kèm - prompt phải nhắc giữ đúng ngoại hình sản phẩm" : "",
+    };
+    const accepted: (z.infer<typeof itemSchema> & { slotInfo: (typeof slots)[number] })[] = [];
+    const isDup = (p: string): boolean => accepted.some((a) => normalizeText(a.prompt) === normalizeText(p) || similarity(a.prompt, p) >= 0.8);
+    let pending = [...slots];
+    for (let round = 0; round < 30 && pending.length; round++) {
+      const nextPending: typeof slots = [];
+      for (let i = 0; i < pending.length; i += 5) {
+        const chunk = pending.slice(i, i + 5);
+        recordEvent(this.ctx.db, { workspaceId, type: "prompts.progress", message: `Đang viết prompt ảnh ${accepted.length + 1}-${Math.min(count, accepted.length + chunk.length)}/${count}` });
+        const out = await this.ctx.llm.json(workspaceId, {
+          model: textModel,
+          system,
+          user: JSON.stringify({ ...context, slots: chunk, already_used_titles: accepted.map((a) => a.title).slice(-60), already_used_openings: accepted.map((a) => a.prompt.slice(0, 80)).slice(-40) }),
+          schema: chunkSchema,
+          temperature: 0.9,
+          maxTokens: 8000,
+        });
+        for (const s of chunk) {
+          const it = out.items.find((x) => x.slot === s.slot);
+          if (!it || !it.prompt.trim() || isDup(it.prompt)) {
+            nextPending.push(s);
+            continue;
+          }
+          let prompt = it.prompt.trim();
+          if (prompt.length > caps.maxPromptChars) prompt = prompt.slice(0, caps.maxPromptChars - 1).replace(/\s+\S*$/, "") + "…";
+          accepted.push({ ...it, prompt, negative: "", slotInfo: s });
+        }
+      }
+      pending = nextPending;
+    }
+    accepted.sort((a, b) => a.slot - b.slot);
+    const name = args.name?.trim() || `AI ${count} prompt ảnh - ${args.aspectRatio}`;
+    const set = this.createSet(workspaceId, actor, {
+      sessionId: args.sessionId ?? null,
+      name,
+      source: "ai",
+      params: { ...args, kind: "image", modelId: IMAGE_MODEL_ID, model: IMAGE_MODEL_ID, durationSec: null, shortfall: count - accepted.length },
+      items: accepted.map((a) => ({ title: a.title, objective: a.objective, prompt: a.prompt, negative: null, durationSec: null, aspectRatio: args.aspectRatio, model: IMAGE_MODEL_ID, genre: a.genre || a.slotInfo.genre, referenceAssetIds: args.referenceAssetIds ?? [] })),
+    });
+    const list = checkList(set.items.map((i) => ({ line: i.index, draft: { prompt: i.prompt } })), []);
+    return {
+      set,
+      requested: count,
+      generated: accepted.length,
+      shortfall: count - accepted.length,
+      duplicatesRemoved: list.duplicates.length,
+      nearDuplicates: list.nearDuplicates,
+      message: accepted.length === count ? `Đã tạo đủ ${count} prompt ảnh khác nhau, chờ duyệt.` : `Chỉ tạo được ${accepted.length}/${count} prompt không trùng sau nhiều vòng - đã lưu phần có được, có thể bấm "AI viết thêm".`,
+    };
+  }
+
   async generate(workspaceId: string, actor: Actor, args: GenerateArgs) {
+    if (args.kind === "image") return this.generateImage(workspaceId, actor, args);
     const count = Math.round(args.count);
     if (!Number.isFinite(count) || count < 1 || count > 10) throw new AppError("INVALID_COUNT", "AI chỉ sinh tối đa 10 prompt mỗi lần (prompt người dùng tự nhập/nhập file thì không giới hạn).", 400);
     const caps = this.modelCaps(workspaceId, args.providerConfigId, args.modelId);
@@ -399,6 +495,18 @@ export class PromptService {
   /** Nhờ AI viết lại MỘT prompt theo hướng dẫn */
   async rewrite(workspaceId: string, itemId: string, instruction: string, providerConfigId: string, modelId: string) {
     const r = this.itemRow(workspaceId, itemId);
+    if (this.setIsImage(r.set_id)) {
+      const icaps = this.imageCaps(workspaceId, providerConfigId);
+      const o = await this.ctx.llm.json(workspaceId, {
+        model: this.ctx.llm.model(workspaceId, "text"),
+        system: `Viết lại một prompt TẠO ẢNH cho model ${icaps.label} (≤ ${Math.min(icaps.maxPromptChars, 1500)} ký tự): chủ thể, bố cục, ống kính, ánh sáng, chất liệu, bảng màu, phong cách; KHÔNG thời lượng/chuyển động/âm thanh. Trả DUY NHẤT JSON {"title":string,"objective":string,"prompt":string}.`,
+        user: JSON.stringify({ current: { title: r.title, objective: r.objective, prompt: r.prompt }, instruction, aspectRatio: r.aspect_ratio }),
+        schema: z.object({ title: z.string(), objective: z.string().default(""), prompt: z.string().min(10) }),
+        temperature: 0.7,
+        maxTokens: 2000,
+      });
+      return this.updateItem(workspaceId, itemId, { title: o.title, objective: o.objective, prompt: o.prompt.slice(0, icaps.maxPromptChars), negative: null, approval: "pending" });
+    }
     const caps = this.modelCaps(workspaceId, providerConfigId, modelId);
     const out = await this.ctx.llm.json(workspaceId, {
       model: this.ctx.llm.model(workspaceId, "text"),

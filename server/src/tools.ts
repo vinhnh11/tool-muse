@@ -6,6 +6,7 @@ import path from "node:path";
 import { z, type ZodTypeAny } from "zod";
 import type { AppContext } from "./context.ts";
 import { BatchService, defaultBatchConfig, type Actor, type BatchConfig, type BatchPromptInput } from "./batches.ts";
+import { IMAGE_ASPECT_RATIOS, IMAGE_CONCURRENCY, IMAGE_MAX_VARIANTS, IMAGE_MODEL_ID, isImageCapable } from "./providers/types.ts";
 import { listPages } from "./fbreels/config.ts";
 import { DeployService } from "./deploy.ts";
 import { audit } from "./events.ts";
@@ -234,17 +235,57 @@ export const TOOLS: ToolDef[] = [
     },
   }),
   def({
+    name: "video_create_image_batch",
+    alias: "video.create_image_batch",
+    description:
+      "Tạo batch ẢNH (Muse Image qua muse2api) ở trạng thái CHỜ DUYỆT - KHÔNG chạy. Mỗi prompt × variantsPerPrompt = số ảnh (~40 giây/ảnh, tiêu hạn mức nick Muse). Sau đó HỎI người dùng; chỉ gọi video_approve_batch khi họ đồng ý (acknowledgeUnknownCost=true; từ 30 ảnh trở lên thêm confirmLarge=true). Không có ảnh tham chiếu thì bỏ referenceAssetId.",
+    schema: z.object({
+      ...promptSourceSchema,
+      name: z.string().optional(),
+      aspectRatio: z.enum(IMAGE_ASPECT_RATIOS).optional().describe("Tỉ lệ khung hình; mặc định 1:1"),
+      variantsPerPrompt: z.number().int().min(1).max(IMAGE_MAX_VARIANTS).optional().describe("Số ảnh cho mỗi prompt (1-4)"),
+      referenceAssetId: z.string().optional().describe("1 ảnh tham chiếu sản phẩm (assetId kind=image)"),
+      maxConcurrency: z.number().int().min(IMAGE_CONCURRENCY.min).max(IMAGE_CONCURRENCY.max).optional().describe("Số ảnh chạy song song (1-6, mặc định 3)"),
+      providerConfigId: z.string().optional(),
+    }),
+    async handler(ctx, c, a) {
+      const list = ctx.providers.list(c.workspaceId).filter((p) => p.enabled && isImageCapable(ctx.providers.adapter(p.providerType)));
+      const p = a.providerConfigId ? list.find((x) => x.id === a.providerConfigId) : list.find((x) => x.status === "active") ?? list[0];
+      if (!p) throw new AppError("NO_IMAGE_PROVIDER", "Chưa có provider Muse (muse2api) nào đang bật để tạo ảnh.", 409);
+      const { prompts, promptSetId } = resolvePrompts(ctx, c.workspaceId, a);
+      const r = new BatchService(ctx).createBatch(c.workspaceId, actorOf(c), {
+        kind: "image",
+        sessionId: c.sessionId ?? null,
+        name: a.name,
+        mode: promptSetId ? "ai" : "list",
+        promptSetId,
+        providerConfigId: p.id,
+        modelId: IMAGE_MODEL_ID,
+        config: { aspectRatio: a.aspectRatio ?? "1:1", variantsPerPrompt: a.variantsPerPrompt ?? 1, referenceAssetIds: a.referenceAssetId ? [a.referenceAssetId] : [] } as unknown as Partial<BatchConfig>,
+        prompts: prompts.map((x) => ({ ...x, durationSec: null, negative: null })),
+        maxConcurrency: a.maxConcurrency ?? IMAGE_CONCURRENCY.default,
+      });
+      return {
+        batchId: r.batch.id,
+        status: r.batch.status,
+        summary: r.check.summary,
+        estimate: { total: r.estimate.total, currency: r.estimate.currency, kind: r.estimate.kind, basis: r.estimate.basis, effectiveConcurrency: r.estimate.effectiveConcurrency, notes: r.estimate.notes },
+        approval: "Batch ảnh đang CHỜ DUYỆT. Báo người dùng số ảnh + ước tính thời gian và chờ họ xác nhận.",
+      };
+    },
+  }),
+  def({
     name: "video_approve_batch",
     alias: "video.approve_batch",
     description:
       "Duyệt và CHẠY batch đang chờ duyệt (có thể TỐN PHÍ). CHỈ gọi khi người dùng đã đồng ý rõ ràng với chi phí ước tính. confirm=true; approvedMaxCost ≥ ước tính khi chi phí xác định; acknowledgeUnknownCost=true khi không ước tính được.",
-    schema: z.object({ batchId: z.string(), confirm: z.boolean(), approvedMaxCost: z.number().nullable().optional(), acknowledgeUnknownCost: z.boolean().optional() }),
+    schema: z.object({ batchId: z.string(), confirm: z.boolean(), approvedMaxCost: z.number().nullable().optional(), acknowledgeUnknownCost: z.boolean().optional(), confirmLarge: z.boolean().optional().describe("Batch ảnh từ 30 ảnh trở lên: phải true sau khi người dùng đồng ý số lượng") }),
     async handler(ctx, c, a) {
       const svc = new BatchService(ctx);
       const b = svc.getBatchRow(c.workspaceId, a.batchId);
       if (c.channel === "chat" && !isFreeProvider(ctx, c.workspaceId, b.provider_config_id))
         return { needsUserApproval: true, batchId: b.id, estimate: b.estimated_cost, currency: b.currency, message: "Batch có thể tính phí: người dùng phải tự bấm 'Duyệt & chạy' trên giao diện. Trợ lý không được tự duyệt." };
-      const r = svc.approveBatch(c.workspaceId, actorOf(c), a.batchId, { confirm: a.confirm, approvedMaxCost: a.approvedMaxCost, acknowledgeUnknownCost: a.acknowledgeUnknownCost });
+      const r = svc.approveBatch(c.workspaceId, actorOf(c), a.batchId, { confirm: a.confirm, approvedMaxCost: a.approvedMaxCost, acknowledgeUnknownCost: a.acknowledgeUnknownCost, confirmLarge: a.confirmLarge });
       return { batchId: r.id, status: r.status };
     },
   }),
