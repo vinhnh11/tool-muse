@@ -125,7 +125,7 @@ test("muse2api: khai năng lực đúng (không tính phí theo request nhưng K
   assert.equal(caps.webhook, false);
 
   const m = caps.models.find((x: any) => x.modelId === "muse-video");
-  assert.deepEqual(m.durations, { min: 3, max: 15, auto: true });
+  assert.deepEqual(m.durations, { min: 3, max: 30, auto: true });
   assert.deepEqual(m.aspectRatios, ["9:16", "16:9"]);
   assert.equal(m.audio, false);
   assert.equal(m.negativePrompt, false);
@@ -164,8 +164,8 @@ test("muse2api: thông số sai bị chặn TRƯỚC khi gọi provider (thời 
   for (const code of ["DURATION_UNSUPPORTED", "ASPECT_UNSUPPORTED", "AUDIO_UNSUPPORTED", "NEGATIVE_UNSUPPORTED"]) assert.ok(codes.includes(code), `thiếu ${code}: ${codes}`);
   assert.equal(fake.requests.filter((r) => r.method === "POST").length, 0, "KHÔNG gọi provider khi thông số sai");
 
-  // 5/6/8/10/15 giây thì qua
-  for (const d of [5, 6, 8, 10]) {
+  // 5/6/8/10/15/30 giây thì qua
+  for (const d of [5, 6, 8, 10, 15, 30]) {
     const ok = await c.post("/api/batches/estimate", { providerConfigId: prov.id, modelId: "muse-video", config: { durationSec: d, aspectRatio: "16:9", resolution: "720p" }, prompts: [{ prompt: `Video ${d} giây` }], maxConcurrency: 1 });
     assert.equal(ok.body.check.ok, true, `${d} giây phải hợp lệ`);
   }

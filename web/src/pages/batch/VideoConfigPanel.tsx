@@ -227,10 +227,10 @@ export function VideoConfigPanel({ cfg }: { cfg: ResolvedConfig }) {
           <div className="grid-2">
             <Field label="Thời lượng (s)" hint={`${model.durations.min}-${model.durations.max}s · prompt ghi "dài N giây" thì theo prompt`}>
               <div className="duration-row">
-                <NumberField ariaLabel="Thời lượng" value={state.durationSec === -1 ? Math.min(model.durations.max, Math.max(model.durations.min, 8)) : state.durationSec} min={model.durations.min} max={model.durations.max} disabled={state.durationSec === -1} onCommit={(v) => set({ durationSec: v })} />
+                <NumberField ariaLabel="Thời lượng" value={state.durationSec === -1 ? Math.min(model.durations.max, Math.max(model.durations.min, 30)) : state.durationSec} min={model.durations.min} max={model.durations.max} disabled={state.durationSec === -1} onCommit={(v) => set({ durationSec: v })} />
                 {model.durations.auto ? (
                   <label className="checkbox">
-                    <input type="checkbox" checked={state.durationSec === -1} onChange={(e) => set({ durationSec: e.target.checked ? -1 : Math.min(model.durations.max, Math.max(model.durations.min, 8)) })} />
+                    <input type="checkbox" checked={state.durationSec === -1} onChange={(e) => set({ durationSec: e.target.checked ? -1 : Math.min(model.durations.max, Math.max(model.durations.min, 30)) })} />
                     <span>Model tự chọn</span>
                   </label>
                 ) : null}

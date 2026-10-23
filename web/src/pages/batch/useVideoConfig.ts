@@ -26,7 +26,7 @@ const DEFAULT: VideoConfigState = {
   modelId: "",
   mode: "text-to-video",
   quality: null,
-  durationSec: 8,
+  durationSec: 30,
   aspectRatio: "9:16",
   resolution: "720p",
   audio: false,
@@ -65,7 +65,7 @@ function normalize(s: VideoConfigState, providers: ProviderConfig[]): VideoConfi
   const mode = model.modes.includes(s.mode) ? s.mode : (model.modes[0] ?? "text-to-video");
   const quality = model.qualityModes.length ? (s.quality && model.qualityModes.includes(s.quality) ? s.quality : model.qualityModes[0]!) : null;
   let durationSec = s.durationSec;
-  if (durationSec === -1 && !model.durations.auto) durationSec = Math.min(model.durations.max, Math.max(model.durations.min, 8));
+  if (durationSec === -1 && !model.durations.auto) durationSec = Math.min(model.durations.max, Math.max(model.durations.min, 30));
   if (durationSec !== -1) durationSec = Math.min(model.durations.max, Math.max(model.durations.min, Math.round(durationSec) || model.durations.min));
   const aspectRatio = model.aspectRatios.includes(s.aspectRatio) ? s.aspectRatio : model.aspectRatios.includes("9:16") ? "9:16" : (model.aspectRatios[0] ?? s.aspectRatio);
   const resolution = model.resolutions.includes(s.resolution) ? s.resolution : model.resolutions.includes(model.defaultResolution) ? model.defaultResolution : (model.resolutions[0] ?? s.resolution);

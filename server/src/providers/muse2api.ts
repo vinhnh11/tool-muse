@@ -54,10 +54,10 @@ export const DEFAULT_MUSE2API_ENDPOINT = "http://127.0.0.1:18610";
 /** build_video_prompt chỉ nhận dọc/ngang; tỷ lệ khác bị diễn giải mơ hồ → chỉ khai 2 cái chắc chắn */
 const RATIOS = ["9:16", "16:9"];
 
-/** app.py: duration mặc định 6; README nêu 5/6/8/10 giây là các mức gửi được */
-const DURATIONS = [5, 6, 8, 10, 15];
+/** app.py: duration mặc định 6; Muse nhận video tới 30 giây */
+const DURATIONS = [5, 6, 8, 10, 15, 30];
 const MIN_SEC = 3;
-const MAX_SEC = 15;
+const MAX_SEC = 30;
 
 export { durationFromPrompt } from "../util.ts";
 import { durationFromPrompt } from "../util.ts";
