@@ -223,3 +223,45 @@ export function validateAgainstModel(input: GenerationInput, caps: ProviderCapab
   if (input.seed !== undefined && input.seed !== null && !m.seed) issues.push({ field: "seed", code: "SEED_UNSUPPORTED", message: `Model ${m.label} không nhận seed.` });
   return issues;
 }
+
+// ---------------------------------------------------------------- ẢNH
+// Tạo ảnh hàng loạt dùng chung hàng đợi/scheduler với video; provider nào làm được ảnh thì
+// khai thêm interface tuỳ chọn này (KHÔNG đụng ProviderCapabilities để video giữ nguyên).
+
+export const IMAGE_ASPECT_RATIOS = ["1:1", "4:5", "9:16", "16:9", "3:4"] as const;
+export const IMAGE_MAX_VARIANTS = 4;
+export const IMAGE_CONCURRENCY = { min: 1, max: 6, default: 3 } as const;
+/** Từ bằng này ảnh trở lên bắt buộc xác nhận riêng trước khi chạy */
+export const IMAGE_CONFIRM_THRESHOLD = 30;
+export const IMAGE_MODEL_ID = "muse-image";
+
+export interface ImageGenerationInput {
+  modelId: string;
+  prompt: string;
+  aspectRatio: string;
+  referenceImages: { path: string; mime: string }[];
+}
+
+export interface ImageModelCaps {
+  modelId: string;
+  label: string;
+  aspectRatios: string[];
+  maxReferenceImages: number;
+  maxPromptChars: number;
+  notes: string[];
+}
+
+export interface ImageCapableProvider {
+  /** Gửi lại cùng Idempotency-Key không tạo ảnh thứ hai */
+  readonly imageIdempotency: boolean;
+  getImageModel(config: ResolvedProviderConfig | null): ImageModelCaps;
+  validateImageInput(input: ImageGenerationInput, config: ResolvedProviderConfig): ValidationIssue[];
+  submitImage(input: ImageGenerationInput, ctx: ProviderCallContext): Promise<{ remoteJobId: string }>;
+  getImageStatus(remoteJobId: string, ctx: ProviderCallContext): Promise<RemoteJobStatus>;
+  retrieveImage(remoteJobId: string, ctx: ProviderCallContext): Promise<RetrievedResult>;
+}
+
+export function isImageCapable(adapter: unknown): adapter is ImageCapableProvider & VideoProvider {
+  const a = adapter as Partial<ImageCapableProvider> | null;
+  return Boolean(a && typeof a.submitImage === "function" && typeof a.getImageStatus === "function" && typeof a.retrieveImage === "function");
+}

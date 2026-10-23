@@ -467,6 +467,15 @@ ALTER TABLE fb_reel_posts ADD COLUMN next_comment_at TEXT;
 CREATE INDEX idx_fbr_comment ON fb_reel_posts(comment_status, next_comment_at);
 `,
   },
+  {
+    version: 5,
+    sql: `
+-- Batch ảnh: dùng lại hàng đợi video, chỉ phân loại bằng cột kind ('video' mặc định | 'image')
+ALTER TABLE video_batches ADD COLUMN kind TEXT NOT NULL DEFAULT 'video';
+ALTER TABLE video_batch_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'video';
+CREATE INDEX idx_assets_kind ON video_assets(workspace_id, kind, origin, created_at);
+`,
+  },
 ];
 
 export function migrate(db: Db, maxVersion = Infinity): void {

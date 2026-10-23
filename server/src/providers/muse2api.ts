@@ -6,6 +6,11 @@ import {
   type CostEstimate,
   type ErrorCategory,
   type GenerationInput,
+  type ImageCapableProvider,
+  type ImageGenerationInput,
+  type ImageModelCaps,
+  IMAGE_ASPECT_RATIOS,
+  IMAGE_MODEL_ID,
   type ModelCapabilities,
   type ProviderCallContext,
   type ProviderCapabilities,
@@ -82,6 +87,19 @@ const MUSE_VIDEO: ModelCapabilities = {
   ],
 };
 
+const MUSE_IMAGE: ImageModelCaps = {
+  modelId: IMAGE_MODEL_ID,
+  label: "Muse Image (qua muse2api)",
+  aspectRatios: [...IMAGE_ASPECT_RATIOS],
+  maxReferenceImages: 1,
+  maxPromptChars: 2000,
+  notes: [
+    "~40 giây/ảnh, ra WebP khoảng 1600px.",
+    "4:5 không có nhánh riêng trong muse2api nên có thể lệch tỷ lệ hơn các tỷ lệ còn lại.",
+    "Tiêu hạn mức tuần của nick Muse. Không hủy được ảnh đã gửi.",
+  ],
+};
+
 function unverifiedModel(modelId: string): ModelCapabilities {
   return {
     ...MUSE_VIDEO,
@@ -117,8 +135,10 @@ const QUOTA_MSG = /quota|hạn mức|额度|credit|限额|exhaust|用完/i;
 const POLICY_MSG = /policy|từ chối|拒答|拒绝|refuse|not allowed|vi phạm/i;
 const TRANSIENT_MSG = /timeout|超时|chờ|busy|忙|đang|unavailable|不可用|connect|网络|network|队列|queue full|重试|retry/i;
 
-export class Muse2ApiProvider implements VideoProvider {
+export class Muse2ApiProvider implements VideoProvider, ImageCapableProvider {
   readonly type = "muse2api";
+  /** POST /v1/images/tasks nhận header Idempotency-Key: cùng key + cùng body → trả lại task cũ */
+  readonly imageIdempotency = true;
   private fetchImpl: typeof fetch;
 
   constructor(fetchImpl: typeof fetch = fetch) {
@@ -179,11 +199,11 @@ export class Muse2ApiProvider implements VideoProvider {
     return (config.endpoint || DEFAULT_MUSE2API_ENDPOINT).replace(/\/+$/, "");
   }
 
-  private async call<T>(ctx: ProviderCallContext, method: string, urlPath: string, body?: unknown, timeoutMs = 60_000): Promise<T> {
+  private async call<T>(ctx: ProviderCallContext, method: string, urlPath: string, body?: unknown, timeoutMs = 60_000, extraHeaders: Record<string, string> = {}): Promise<T> {
     // muse2api chạy browser thật nên có thể chậm; cho người dùng nới hạn chờ mỗi request
     const confTimeout = Number(ctx.config.options?.requestTimeoutMs);
     const effTimeout = Number.isFinite(confTimeout) && confTimeout > 0 ? confTimeout : timeoutMs;
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = { "Content-Type": "application/json", ...extraHeaders };
     // Server bỏ trống MUSE2API_KEY thì không cần header; có key thì bắt buộc Bearer
     if (ctx.config.apiKey) headers.Authorization = `Bearer ${ctx.config.apiKey}`;
     let res: Response;
@@ -282,9 +302,77 @@ export class Muse2ApiProvider implements VideoProvider {
     const raw = t.url ?? t.video?.url ?? t.result?.url ?? "";
     if (mapMuseTask(t).status !== "completed" || !raw) throw new ProviderError("INVALID_RESULT", `Task ${remoteJobId} chưa có link video (status=${t.status ?? "?"}).`);
     // media_url() trả đường dẫn TƯƠNG ĐỐI khi MUSE2API_PUBLIC_BASE trống → tự ghép base
-    const url = /^https?:\/\//i.test(raw) ? raw : `${this.base(ctx.config)}${raw.startsWith("/") ? "" : "/"}${raw}`;
+    const url = this.absoluteUrl(ctx.config, raw);
     // /v1/media/{name} không đòi Authorization nên tải trực tiếp được; file nằm trên đĩa, không hết hạn
     return { url, mime: "video/mp4", expiresAt: null };
+  }
+
+  private absoluteUrl(config: ResolvedProviderConfig, raw: string): string {
+    return /^https?:\/\//i.test(raw) ? raw : `${this.base(config)}${raw.startsWith("/") ? "" : "/"}${raw}`;
+  }
+
+  // ------------------------------------------------------------ ẢNH (POST /v1/images/tasks)
+
+  getImageModel(_config: ResolvedProviderConfig | null): ImageModelCaps {
+    return MUSE_IMAGE;
+  }
+
+  validateImageInput(input: ImageGenerationInput, config: ResolvedProviderConfig): ValidationIssue[] {
+    const issues: ValidationIssue[] = [];
+    const p = input.prompt?.trim() ?? "";
+    if (!p) issues.push({ field: "prompt", code: "EMPTY_PROMPT", message: "Prompt trống." });
+    if (p.length > MUSE_IMAGE.maxPromptChars) issues.push({ field: "prompt", code: "PROMPT_TOO_LONG", message: `Prompt dài ${p.length} ký tự, tạo ảnh cho tối đa ${MUSE_IMAGE.maxPromptChars}.` });
+    if (!MUSE_IMAGE.aspectRatios.includes(input.aspectRatio)) issues.push({ field: "aspectRatio", code: "ASPECT_UNSUPPORTED", message: `Tạo ảnh không hỗ trợ tỷ lệ ${input.aspectRatio} (chọn ${MUSE_IMAGE.aspectRatios.join(", ")}).` });
+    if (input.referenceImages.length > MUSE_IMAGE.maxReferenceImages) issues.push({ field: "referenceImages", code: "TOO_MANY_REFERENCES", message: `Tạo ảnh nhận tối đa ${MUSE_IMAGE.maxReferenceImages} ảnh tham chiếu.` });
+    for (const ref of input.referenceImages) {
+      if (!/^image\/(jpeg|png|webp)$/.test(ref.mime)) issues.push({ field: "referenceImages", code: "REFERENCE_FORMAT", message: `Ảnh tham chiếu ${ref.mime} chưa được hỗ trợ (dùng JPEG/PNG/WebP).` });
+      try {
+        if (fs.statSync(ref.path).size > 10 * 1024 * 1024) issues.push({ field: "referenceImages", code: "REFERENCE_TOO_LARGE", message: "Ảnh tham chiếu lớn hơn 10MB." });
+      } catch {
+        issues.push({ field: "referenceImages", code: "REFERENCE_MISSING", message: "Không đọc được file ảnh tham chiếu." });
+      }
+    }
+    if (!config.endpoint?.trim()) issues.push({ field: "provider", code: "PROVIDER_NOT_CONFIGURED", message: "Chưa nhập địa chỉ muse2api (vd http://127.0.0.1:18610)." });
+    return issues;
+  }
+
+  /** ImageRequest của app.py. Body phải GIỐNG HỆT khi gửi lại cùng Idempotency-Key (không timestamp/ngẫu nhiên). */
+  buildImageBody(input: ImageGenerationInput, config: ResolvedProviderConfig): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+      model: IMAGE_MODEL_ID,
+      prompt: input.prompt,
+      aspect_ratio: input.aspectRatio,
+      size: input.aspectRatio,
+    };
+    const t = Number(config.options?.imageTimeoutSec);
+    body.timeout = Math.round(Number.isFinite(t) && t > 0 ? Math.max(1, Math.min(600, t)) : 300);
+    const ref = input.referenceImages[0];
+    if (ref) body.reference_image = `data:${ref.mime};base64,${fs.readFileSync(ref.path).toString("base64")}`;
+    const extra = config.options?.extraImagePrompt;
+    if (typeof extra === "string" && extra.trim()) body.extra = extra.trim();
+    return body;
+  }
+
+  async submitImage(input: ImageGenerationInput, ctx: ProviderCallContext): Promise<{ remoteJobId: string }> {
+    const res = await this.call<MuseTask>(ctx, "POST", "/v1/images/tasks", this.buildImageBody(input, ctx.config), 60_000, { "Idempotency-Key": ctx.idempotencyKey.slice(0, 256) });
+    const id = res?.id ?? res?.task_id;
+    if (!id) throw new ProviderError("INVALID_RESULT", "muse2api không trả task id cho ảnh.");
+    ctx.log(`[muse2api] đã tạo task ảnh ${id}`);
+    return { remoteJobId: String(id) };
+  }
+
+  async getImageStatus(remoteJobId: string, ctx: ProviderCallContext): Promise<RemoteJobStatus> {
+    const t = await this.call<MuseTask>(ctx, "GET", `/v1/images/tasks/${encodeURIComponent(remoteJobId)}`);
+    return mapMuseTask(t, "ảnh");
+  }
+
+  async retrieveImage(remoteJobId: string, ctx: ProviderCallContext): Promise<RetrievedResult> {
+    const t = await this.call<MuseTask>(ctx, "GET", `/v1/images/tasks/${encodeURIComponent(remoteJobId)}`);
+    const raw = t.url ?? t.result?.url ?? "";
+    if (mapMuseTask(t, "ảnh").status !== "completed" || !raw) throw new ProviderError("INVALID_RESULT", `Task ${remoteJobId} chưa có link ảnh (status=${t.status ?? "?"}).`);
+    const url = this.absoluteUrl(ctx.config, raw);
+    const ext = (/\.(png|jpe?g|webp)(?:\?|$)/i.exec(url)?.[1] ?? "webp").toLowerCase();
+    return { url, mime: ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg", expiresAt: null };
   }
 
   /** Kiểm cấu hình: /v1/models xác thực key, /readyz cho biết pool có tài khoản chưa. KHÔNG tạo video. */
@@ -308,7 +396,7 @@ export class Muse2ApiProvider implements VideoProvider {
 }
 
 /** Chuẩn hoá task muse2api → trạng thái BVS. app.py đã map succeeded/success/done → completed. */
-export function mapMuseTask(t: MuseTask): RemoteJobStatus {
+export function mapMuseTask(t: MuseTask, what: "video" | "ảnh" = "video"): RemoteJobStatus {
   const status = String(t.status ?? "").toLowerCase();
   // t.progress === null/undefined phải giữ null (Number(null) = 0 sẽ làm thanh tiến độ tụt về 0)
   const progress = t.progress === null || t.progress === undefined || !Number.isFinite(Number(t.progress)) ? null : Math.max(0, Math.min(100, Number(t.progress)));
@@ -317,7 +405,7 @@ export function mapMuseTask(t: MuseTask): RemoteJobStatus {
   if (status === "processing" || status === "running") return { status: "processing", progress };
   if (status === "cancelled" || status === "canceled" || status === "stopped") return { status: "cancelled", progress };
   if (status === "failed" || status === "error") {
-    const msg = t.error ?? "muse2api tạo video thất bại.";
+    const msg = t.error ?? `muse2api tạo ${what} thất bại.`;
     let category: ErrorCategory = "GENERATION_FAILED";
     let transient = false;
     if (AUTH_MSG.test(msg)) category = "AUTH";
