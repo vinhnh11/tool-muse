@@ -4,7 +4,7 @@ import { PRICING_LABEL, fmtCost, fmtNumber, truncate } from "../labels";
 import { Badge } from "./Badge";
 
 /** Kết quả kiểm prompt (BatchCheck) - lỗi theo số dòng */
-export function CheckResultView({ check, limit = 80 }: { check: BatchCheck; limit?: number }) {
+export function CheckResultView({ check, limit = 80, unit = "video" }: { check: BatchCheck; limit?: number; unit?: string }) {
   const bad = check.items.filter((i) => i.issues.length > 0);
   return (
     <div className={`check-result ${check.ok ? "is-ok" : "is-bad"}`}>
@@ -19,7 +19,7 @@ export function CheckResultView({ check, limit = 80 }: { check: BatchCheck; limi
         <Stat label="Không hợp lệ" value={check.invalidPrompts} tone={check.invalidPrompts ? "danger" : undefined} />
         <Stat label="Trùng" value={check.duplicateCount} tone={check.duplicateCount ? "warning" : undefined} />
         <Stat label="Dòng trống (bỏ qua)" value={check.blankLines.length} />
-        <Stat label="Số video" value={check.jobCount} tone="accent" />
+        <Stat label={`Số ${unit}`} value={check.jobCount} tone="accent" />
       </div>
       {check.batchIssues.length ? (
         <ul className="issue-list">
@@ -93,7 +93,7 @@ export function EstimateView({ estimate }: { estimate: BatchEstimate }) {
       <div className="estimate-main">
         <CircleDollarSign size={20} className={known ? "text-accent" : "text-warning"} aria-hidden />
         <div>
-          <div className="estimate-label">Chi phí ước tính cho {fmtNumber(estimate.jobCount)} video</div>
+          <div className="estimate-label">{estimate.imageCount !== undefined ? `Tạo ${fmtNumber(estimate.jobCount)} ảnh` : `Chi phí ước tính cho ${fmtNumber(estimate.jobCount)} video`}</div>
           <div className={`estimate-total${known ? "" : " is-unknown"}`}>{known ? fmtCost(estimate.total, estimate.currency) : "Không xác định"}</div>
           {estimate.basis ? <div className="muted small">{estimate.basis}</div> : null}
         </div>

@@ -13,7 +13,7 @@ import { useStudio } from "../../state/studio";
 import { CONCURRENCY_OPTIONS, type ResolvedConfig } from "./useVideoConfig";
 
 /** Ô số chỉ áp dụng khi rời ô / Enter (tránh bị kẹp giá trị khi đang gõ) */
-function NumberField({ value, min, max, onCommit, disabled, ariaLabel }: { value: number; min: number; max: number; onCommit: (v: number) => void; disabled?: boolean; ariaLabel?: string }) {
+export function NumberField({ value, min, max, onCommit, disabled, ariaLabel }: { value: number; min: number; max: number; onCommit: (v: number) => void; disabled?: boolean; ariaLabel?: string }) {
   const [draft, setDraft] = useState(String(value));
   useEffect(() => setDraft(String(value)), [value]);
   const commit = () => {
@@ -42,12 +42,6 @@ function NumberField({ value, min, max, onCommit, disabled, ariaLabel }: { value
 }
 
 export function ReferencePicker({ cfg }: { cfg: ResolvedConfig }) {
-  const { sessionId } = useStudio();
-  const toast = useToast();
-  const dialogs = useDialogs();
-  const images = useApi(() => api.assets({ kind: "image", sessionId }).then((r) => r.assets), [sessionId]);
-  const [uploading, setUploading] = useState<number | null>(null);
-  const input = useRef<HTMLInputElement>(null);
   const max = cfg.model?.maxReferenceImages ?? 0;
   const selected = cfg.state.referenceAssetIds;
   const mode = cfg.state.mode;
@@ -58,11 +52,22 @@ export function ReferencePicker({ cfg }: { cfg: ResolvedConfig }) {
     else if (selected.length === 0 && mode === "image-to-video" && modes.includes("text-to-video")) cfg.set({ mode: "text-to-video" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected.length, mode, modes.join(",")]);
+  return <ReferenceGrid max={max} selected={selected} onChange={(ids) => cfg.set({ referenceAssetIds: ids })} />;
+}
+
+/** Chọn / tải / xóa ảnh tham chiếu - dùng chung cho batch video và batch ảnh */
+export function ReferenceGrid({ max, selected, onChange }: { max: number; selected: string[]; onChange: (ids: string[]) => void }) {
+  const { sessionId } = useStudio();
+  const toast = useToast();
+  const dialogs = useDialogs();
+  const images = useApi(() => api.assets({ kind: "image", sessionId }).then((r) => r.assets), [sessionId]);
+  const [uploading, setUploading] = useState<number | null>(null);
+  const input = useRef<HTMLInputElement>(null);
 
   const toggle = (a: Asset) => {
-    if (selected.includes(a.id)) cfg.set({ referenceAssetIds: selected.filter((x) => x !== a.id) });
-    else if (selected.length >= max) toast.error(`Model chỉ nhận tối đa ${max} ảnh tham chiếu.`);
-    else cfg.set({ referenceAssetIds: [...selected, a.id] });
+    if (selected.includes(a.id)) onChange(selected.filter((x) => x !== a.id));
+    else if (selected.length >= max) toast.error(`Chỉ nhận tối đa ${max} ảnh tham chiếu.`);
+    else onChange([...selected, a.id]);
   };
 
   /** Xóa hẳn ảnh tham chiếu khỏi máy (hỏi xác nhận; bỏ khỏi lựa chọn hiện tại) */
@@ -80,7 +85,7 @@ export function ReferencePicker({ cfg }: { cfg: ResolvedConfig }) {
         toast.error("Không xóa được ảnh", r.skipped[0]!.reason);
         return;
       }
-      if (selected.includes(a.id)) cfg.set({ referenceAssetIds: selected.filter((x) => x !== a.id) });
+      if (selected.includes(a.id)) onChange(selected.filter((x) => x !== a.id));
       await images.reload();
       toast.success("Đã xóa ảnh");
     } catch (e) {
@@ -95,7 +100,7 @@ export function ReferencePicker({ cfg }: { cfg: ResolvedConfig }) {
       const out = await uploadAssets(Array.from(files), { kind: "image", sessionId }, setUploading);
       await images.reload();
       const room = Math.max(0, max - selected.length);
-      if (room) cfg.set({ referenceAssetIds: [...selected, ...out.map((a) => a.id).slice(0, room)] });
+      if (room) onChange([...selected, ...out.map((a) => a.id).slice(0, room)]);
       toast.success(`Đã tải lên ${out.length} ảnh`);
     } catch (e) {
       toast.error("Tải ảnh thất bại", asApiError(e).message);
@@ -137,7 +142,7 @@ export function ReferencePicker({ cfg }: { cfg: ResolvedConfig }) {
         })}
       </div>
       {selected.some((id) => !(images.data ?? []).some((a) => a.id === id)) ? (
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => cfg.set({ referenceAssetIds: selected.filter((id) => (images.data ?? []).some((a) => a.id === id)) })}>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => onChange(selected.filter((id) => (images.data ?? []).some((a) => a.id === id)))}>
           <X size={14} />
           <span className="btn-label">Bỏ ảnh không còn trong phiên</span>
         </button>

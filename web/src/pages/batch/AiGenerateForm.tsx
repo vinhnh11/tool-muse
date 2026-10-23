@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Rocket, Sparkles } from "lucide-react";
-import { api, asApiError, type ApiError, type GenerateResult } from "../../api";
+import { api, asApiError, type ApiError, type BatchKind, type GenerateResult } from "../../api";
 import { Button } from "../../components/Button";
 import { ErrorBanner } from "../../components/EmptyState";
 import { Checkbox, Field, Input, Select, TextArea } from "../../components/Field";
@@ -11,7 +11,9 @@ import { useStudio } from "../../state/studio";
 import type { ResolvedConfig } from "./useVideoConfig";
 
 /** "Tạo prompt bằng AI" từ mô tả/brief của người dùng */
-export function AiGenerateForm({ cfg, onGenerated }: { cfg: ResolvedConfig; onGenerated: (r: GenerateResult, opts?: { deploy?: boolean }) => void }) {
+export function AiGenerateForm({ cfg, onGenerated, kind = "video" }: { cfg: ResolvedConfig; onGenerated: (r: GenerateResult, opts?: { deploy?: boolean }) => void; kind?: BatchKind }) {
+  const isImage = kind === "image";
+  const unit = isImage ? "ảnh" : "video";
   const { sessionId } = useStudio();
 
   const [count, setCount] = useState("10");
@@ -37,8 +39,8 @@ export function AiGenerateForm({ cfg, onGenerated }: { cfg: ResolvedConfig; onGe
       const consistency = { product: product.trim() || undefined, brand: brand.trim() || undefined, character: character.trim() || undefined };
       const r = await api.generatePromptSet({
         sessionId,
+        ...(isImage ? { kind: "image" as const } : { durationSec: cfg.state.durationSec }),
         count: countNum,
-        durationSec: cfg.state.durationSec,
         aspectRatio: cfg.state.aspectRatio,
         providerConfigId: cfg.provider.id,
         modelId: cfg.model.modelId,
@@ -116,14 +118,14 @@ export function AiGenerateForm({ cfg, onGenerated }: { cfg: ResolvedConfig; onGe
             <strong>
               <Rocket size={13} aria-hidden /> Sinh xong triển khai luôn
             </strong>
-            <span className="muted small">Mỗi prompt = 1 video ({countValid ? `${countNum} prompt → ${countNum} video` : "N prompt → N video"}). Mock chạy ngay; provider tính phí vẫn hiện chi phí để bạn xác nhận.</span>
+            <span className="muted small">Mỗi prompt = {isImage ? `${cfg.state.variantsPerPrompt} ảnh` : "1 video"} ({countValid ? `${countNum} prompt → ${countNum * (isImage ? cfg.state.variantsPerPrompt : 1)} ${unit}` : `N prompt → N ${unit}`}). {isImage ? "Vẫn hỏi xác nhận trước khi chạy." : "Mock chạy ngay; provider tính phí vẫn hiện chi phí để bạn xác nhận."}</span>
           </span>
         }
       />
 
       <div className="ai-form-foot">
         <span className="muted small">
-          Prompt viết cho {cfg.model ? <code>{cfg.model.modelId}</code> : "model đã chọn"} · {fmtSeconds(cfg.state.durationSec)} · {cfg.state.aspectRatio} (lấy từ Cấu hình video). Có thể mất 1-2 phút.
+          Prompt viết cho {cfg.model ? <code>{cfg.model.modelId}</code> : "model đã chọn"} · {isImage ? "" : `${fmtSeconds(cfg.state.durationSec)} · `}{cfg.state.aspectRatio} (lấy từ Cấu hình {isImage ? "ảnh" : "video"}). Có thể mất 1-2 phút.
         </span>
         <Button variant="primary" icon={<Sparkles size={16} />} loading={busy} disabled={!cfg.model || !countValid || busy} onClick={submit}>
           {busy ? "AI đang viết prompt..." : deployAfter ? `Tạo ${countValid ? countNum : ""} prompt & triển khai` : `Tạo ${countValid ? countNum : ""} prompt bằng AI`}

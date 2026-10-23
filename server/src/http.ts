@@ -538,7 +538,7 @@ export function createApp(ctx: AppContext): express.Express {
       let items = b.items;
       if (!items && typeof b.text === "string") items = parsePrompts(b.text, detectFormat(b.fileName, b.text)).items.map((i) => i.draft);
       if (!Array.isArray(items) || !items.length) throw new AppError("NO_PROMPTS", "Chưa có prompt.", 400);
-      return prompts.createSet(ws(req), actorOf(req), { sessionId: b.sessionId ?? null, name: String(b.name ?? "Bộ prompt"), source: b.text ? "import" : "manual", items });
+      return prompts.createSet(ws(req), actorOf(req), { sessionId: b.sessionId ?? null, name: String(b.name ?? "Bộ prompt"), source: b.text ? "import" : "manual", params: b.kind === "image" ? { kind: "image" } : undefined, items });
     }),
   );
   app.post(
@@ -584,6 +584,7 @@ export function createApp(ctx: AppContext): express.Express {
         dryRun: b.dryRun === true,
         run,
         fbPage: typeof b.fbPage === "string" ? b.fbPage : null,
+        kind: b.kind === "image" ? "image" : undefined,
       });
     }),
   );

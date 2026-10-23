@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ExternalLink, PlayCircle, ShieldCheck } from "lucide-react";
-import { api, asApiError, type ApiError, type Batch, type BatchEstimate } from "../api";
+import { api, asApiError, IMAGE_CONFIRM_THRESHOLD, type ApiError, type Batch, type BatchEstimate } from "../api";
 import { emitLocal } from "../hooks/useEvents";
 import { BATCH_STATUS_META, MODE_LABEL, QUALITY_LABEL, fmtCost, fmtSeconds } from "../labels";
 import { useStudio } from "../state/studio";
@@ -9,6 +9,7 @@ import { Button } from "./Button";
 import { EstimateView } from "./CheckResult";
 import { ErrorBanner, Loading } from "./EmptyState";
 import { Checkbox } from "./Field";
+import { useDialogs } from "./ConfirmDialog";
 import { Modal } from "./Modal";
 import { useToast } from "./Toast";
 
@@ -22,6 +23,7 @@ function isEstimate(x: unknown): x is BatchEstimate {
 export function ApprovalDialog({ batchId, initialEstimate, onClose }: { batchId: string; initialEstimate: BatchEstimate | null; onClose: () => void }) {
   const { setSelectedBatchId, navigate } = useStudio();
   const toast = useToast();
+  const dialogs = useDialogs();
   const [batch, setBatch] = useState<Batch | null>(null);
   const [loadError, setLoadError] = useState<ApiError | null>(null);
   const [estimate, setEstimate] = useState<BatchEstimate | null>(initialEstimate);
@@ -50,8 +52,17 @@ export function ApprovalDialog({ batchId, initialEstimate, onClose }: { batchId:
   const jobCount = batch ? (batch.status === "awaiting_approval" ? (batch.counts.awaiting_approval ?? 0) : batch.total) : (estimate?.jobCount ?? 0);
   const currency = estimate?.currency ?? batch?.currency ?? "USD";
 
+  const isImage = batch?.kind === "image";
+  const unit = isImage ? "ảnh" : "video";
+
   const approve = async () => {
     if (!batch) return;
+    const large = isImage && jobCount >= IMAGE_CONFIRM_THRESHOLD;
+    if (large) {
+      const eta = Math.max(1, Math.ceil((jobCount * 40) / Math.max(1, estimate?.effectiveConcurrency ?? batch.maxConcurrency) / 60));
+      const ok = await dialogs.confirm({ title: `Tạo ${jobCount} ảnh?`, body: `Sẽ tạo ${jobCount} ảnh (~${eta} phút), tiêu hạn mức tuần của nick Muse. Tiếp tục?`, confirmLabel: `Tạo ${jobCount} ảnh` });
+      if (!ok) return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -59,8 +70,9 @@ export function ApprovalDialog({ batchId, initialEstimate, onClose }: { batchId:
         confirm: true,
         ...(total !== null ? { approvedMaxCost: total } : {}),
         acknowledgeUnknownCost: unknown ? ack : false,
+        ...(large ? { confirmLarge: true } : {}),
       });
-      toast.success("Đã duyệt - batch bắt đầu chạy", `${jobCount} video vào hàng đợi.`);
+      toast.success("Đã duyệt - batch bắt đầu chạy", `${jobCount} ${unit} vào hàng đợi.`);
       setSelectedBatchId(batch.id);
       emitLocal({ type: "local.batch", batchId: batch.id });
       onClose();
@@ -122,7 +134,7 @@ export function ApprovalDialog({ batchId, initialEstimate, onClose }: { batchId:
           <div className="approval-hero">
             <div>
               <div className="approval-count">{jobCount}</div>
-              <div className="muted small">video sẽ được tạo</div>
+              <div className="muted small">{unit} sẽ được tạo</div>
             </div>
             <div className="approval-meta">
               <div>
@@ -132,14 +144,17 @@ export function ApprovalDialog({ batchId, initialEstimate, onClose }: { batchId:
                 <span className="muted">Model:</span> <code>{batch.modelId}</code>
               </div>
               <div>
-                <span className="muted">Cấu hình:</span> {MODE_LABEL[batch.config.mode]} · {fmtSeconds(batch.config.durationSec)} · {batch.config.aspectRatio} · {batch.config.resolution}
-                {batch.config.audio ? " · có âm thanh" : ""}
-                {batch.config.quality ? ` · ${QUALITY_LABEL[batch.config.quality] ?? batch.config.quality}` : ""}
-                {batch.config.variantsPerPrompt > 1 ? ` · ${batch.config.variantsPerPrompt} lần/prompt` : ""}
+                <span className="muted">Cấu hình:</span>{" "}
+                {isImage ? `${batch.config.aspectRatio} · ${batch.config.variantsPerPrompt} ảnh/prompt` : `${MODE_LABEL[batch.config.mode]} · ${fmtSeconds(batch.config.durationSec)} · ${batch.config.aspectRatio} · ${batch.config.resolution}`}
+                {!isImage && batch.config.audio ? " · có âm thanh" : ""}
+                {!isImage && batch.config.quality ? ` · ${QUALITY_LABEL[batch.config.quality] ?? batch.config.quality}` : ""}
+                {!isImage && batch.config.variantsPerPrompt > 1 ? ` · ${batch.config.variantsPerPrompt} lần/prompt` : ""}
               </div>
-              <div>
-                <span className="muted">Ngân sách tối đa:</span> {batch.budgetLimit !== null ? fmtCost(batch.budgetLimit, currency) : "không đặt"}
-              </div>
+              {isImage ? null : (
+                <div>
+                  <span className="muted">Ngân sách tối đa:</span> {batch.budgetLimit !== null ? fmtCost(batch.budgetLimit, currency) : "không đặt"}
+                </div>
+              )}
               <div>
                 <span className="muted">Số luồng bạn chọn:</span> {batch.maxConcurrency}
               </div>
@@ -151,11 +166,11 @@ export function ApprovalDialog({ batchId, initialEstimate, onClose }: { batchId:
           {unknown && awaiting ? (
             <div className="ack-box">
               <ShieldCheck size={16} aria-hidden />
-              <Checkbox checked={ack} onChange={setAck} label="Tôi chấp nhận chi phí không xác định" />
+              <Checkbox checked={ack} onChange={setAck} label={isImage ? "Tôi hiểu mỗi ảnh tiêu hạn mức tuần của nick Muse" : "Tôi chấp nhận chi phí không xác định"} />
             </div>
           ) : null}
           {error ? <ErrorBanner error={error} title={error.code === "COST_CONFIRMATION_MISMATCH" ? "Ước tính đã thay đổi - kiểm tra lại con số rồi xác nhận lần nữa" : undefined} /> : null}
-          {awaiting ? <p className="muted small">Bấm "Duyệt & chạy" là bạn đồng ý chi phí tối đa {total !== null ? fmtCost(total, currency) : "không xác định"}. Hệ thống không gửi yêu cầu nào tới provider trước bước này.</p> : null}
+          {awaiting ? <p className="muted small">Bấm "Duyệt & chạy" là bạn đồng ý {isImage ? "tiêu hạn mức nick Muse cho các ảnh này" : `chi phí tối đa ${total !== null ? fmtCost(total, currency) : "không xác định"}`}. Hệ thống không gửi yêu cầu nào tới provider trước bước này.</p> : null}
         </div>
       ) : null}
     </Modal>

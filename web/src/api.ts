@@ -220,6 +220,9 @@ export interface Asset {
 }
 
 export interface LibraryItem extends Asset {
+  /** Loại hiển thị: video do provider tạo, hay ảnh do Muse Image tạo */
+  kindOf: "video" | "image";
+  aspectRatio: string | null;
   batchId: string | null;
   batchName: string | null;
   sessionTitle: string | null;
@@ -308,8 +311,10 @@ export interface PromptSetSummary {
 
 export interface GenerateBody {
   sessionId?: string | null;
+  /** "image" = AI viết prompt cho tạo ảnh (không thời lượng) */
+  kind?: BatchKind;
   count: number;
-  durationSec: number;
+  durationSec?: number;
   aspectRatio: string;
   providerConfigId: string;
   modelId: string;
@@ -345,6 +350,20 @@ export interface BatchConfig {
   maxAttempts: number;
 }
 
+export type BatchKind = "video" | "image";
+
+/** Cấu hình batch ảnh (Muse Image) */
+export interface ImageBatchConfig {
+  aspectRatio: string;
+  variantsPerPrompt: number;
+  referenceAssetIds: string[];
+  maxAttempts?: number;
+}
+
+export const IMAGE_ASPECT_RATIOS = ["1:1", "4:5", "9:16", "16:9", "3:4"] as const;
+export const IMAGE_MODEL_ID = "muse-image";
+export const IMAGE_CONFIRM_THRESHOLD = 30;
+
 export interface Issue {
   field: string;
   code: string;
@@ -368,6 +387,9 @@ export interface BatchCheck {
 
 export interface BatchEstimate {
   jobCount: number;
+  /** Chỉ batch ảnh */
+  imageCount?: number;
+  etaMinutes?: number;
   total: number | null;
   currency: string;
   kind: PricingKind;
@@ -381,6 +403,7 @@ export interface BatchEstimate {
 
 export interface Batch {
   id: string;
+  kind: BatchKind;
   sessionId: string | null;
   name: string;
   mode: string;
@@ -410,13 +433,15 @@ export interface Batch {
 }
 
 export interface BatchRequest {
+  /** Mặc định video */
+  kind?: BatchKind;
   name?: string;
   sessionId?: string | null;
   mode?: "single" | "list" | "file" | "ai";
   promptSetId?: string | null;
   providerConfigId: string;
   modelId: string;
-  config: BatchConfig;
+  config: BatchConfig | ImageBatchConfig;
   prompts: PromptInput[];
   maxConcurrency: number;
   budgetLimit?: number | null;
@@ -432,6 +457,8 @@ export interface CostConfirm {
   confirm: true;
   approvedMaxCost?: number;
   acknowledgeUnknownCost?: boolean;
+  /** Batch ảnh từ 30 ảnh trở lên */
+  confirmLarge?: boolean;
 }
 
 export type DeploySelection = "auto" | "approved" | "all";
@@ -440,7 +467,7 @@ export interface DeployBody {
   sessionId?: string | null;
   providerConfigId?: string;
   modelId?: string;
-  config?: Partial<BatchConfig>;
+  config?: Partial<BatchConfig> | Partial<ImageBatchConfig>;
   selection?: DeploySelection;
   useItemOverrides?: boolean;
   defaultNegative?: string | null;
@@ -448,7 +475,7 @@ export interface DeployBody {
   budgetLimit?: number | null;
   name?: string;
   dryRun?: boolean;
-  run?: { confirm: true; approvedMaxCost?: number | null; acknowledgeUnknownCost?: boolean };
+  run?: { confirm: true; approvedMaxCost?: number | null; acknowledgeUnknownCost?: boolean; confirmLarge?: boolean };
   fbPage?: string;
 }
 
@@ -472,6 +499,7 @@ export interface DeployResult {
 
 export interface Job {
   id: string;
+  kind: BatchKind;
   batchId: string;
   sessionId: string | null;
   seq: number;
@@ -739,7 +767,7 @@ export const api = {
   // prompt
   parsePrompts: (body: { text: string; fileName?: string; format?: "txt" | "csv" | "json" }) => post<ParseResult>("/api/prompts/parse", body),
   promptSets: (sessionId?: string | null) => get<{ sets: PromptSetSummary[] }>(`/api/prompt-sets${qs({ sessionId })}`),
-  createPromptSet: (body: { name: string; sessionId?: string | null; items?: PromptInput[]; text?: string; fileName?: string }) => post<PromptSet>("/api/prompt-sets", body),
+  createPromptSet: (body: { name: string; sessionId?: string | null; items?: PromptInput[]; text?: string; fileName?: string; kind?: BatchKind }) => post<PromptSet>("/api/prompt-sets", body),
   generatePromptSet: (body: GenerateBody) => post<GenerateResult>("/api/prompt-sets/generate", body),
   promptSet: (id: string) => get<PromptSet>(`/api/prompt-sets/${enc(id)}`),
   deployPromptSet: (id: string, body: DeployBody) => post<DeployResult>(`/api/prompt-sets/${enc(id)}/deploy`, body),
@@ -755,7 +783,7 @@ export const api = {
   // batch
   estimate: (body: BatchRequest) => post<{ check: BatchCheck; estimate: BatchEstimate }>("/api/batches/estimate", body),
   createBatch: (body: BatchRequest) => post<{ batch: Batch; check: BatchCheck; estimate: BatchEstimate }>("/api/batches", body),
-  batches: (sessionId?: string | null) => get<{ batches: Batch[] }>(`/api/batches${qs({ sessionId })}`),
+  batches: (sessionId?: string | null, kind: BatchKind | "all" = "video") => get<{ batches: Batch[] }>(`/api/batches${qs({ sessionId, kind })}`),
   batch: (id: string) => get<Batch>(`/api/batches/${enc(id)}`),
   approveBatch: (id: string, body: CostConfirm) => post<Batch>(`/api/batches/${enc(id)}/approve`, body),
   setBatchConcurrency: (id: string, maxConcurrency: number) => post<Batch>(`/api/batches/${enc(id)}/concurrency`, { maxConcurrency }),
@@ -778,10 +806,12 @@ export const api = {
   regenerateJob: (id: string, body: { prompt?: string; negative?: string | null; durationSec?: number; aspectRatio?: string } & Partial<CostConfirm>) => post<Job>(`/api/jobs/${enc(id)}/regenerate`, body),
 
   // thư viện
-  library: (libraryOnly: boolean) => get<{ items: LibraryItem[] }>(`/api/library${qs({ libraryOnly })}`),
+  library: (libraryOnly: boolean, kind: BatchKind | "all" = "video") => get<{ items: LibraryItem[] }>(`/api/library${qs({ libraryOnly, kind })}`),
 };
 
 export const exportUrls = {
+  /** ZIP mọi file đã xong của batch (dùng cho batch ảnh) */
+  batchZip: (id: string) => `/api/batches/${enc(id)}/zip`,
   batch: (id: string, format: "zip" | "csv" | "json" | "txt") => `/api/batches/${enc(id)}/export?format=${format}`,
   promptSet: (id: string, format: "txt" | "csv" | "json", onlyApproved = false) => `/api/prompt-sets/${enc(id)}/export?format=${format}${onlyApproved ? "&onlyApproved=1" : ""}`,
 };

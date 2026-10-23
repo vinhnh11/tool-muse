@@ -112,14 +112,14 @@ export function JobsManager({ batch }: { batch: Batch }) {
       <div className="row-actions">
         <IconButton label="Xem" icon={<Eye size={14} />} onClick={() => open(j)} />
         {j.output ? (
-          <a className="btn btn-ghost btn-sm btn-icon-only" href={j.output.download} download title="Tải video" aria-label="Tải video">
+          <a className="btn btn-ghost btn-sm btn-icon-only" href={j.output.download} download title={j.kind === "image" ? "Tải ảnh" : "Tải video"} aria-label={j.kind === "image" ? "Tải ảnh" : "Tải video"}>
             <Download size={14} />
           </a>
         ) : null}
         {canApprove ? <IconButton label="Duyệt & chạy phiên bản này" icon={<Check size={14} />} onClick={() => actions.approveJobs([j])} /> : null}
         {canCancel ? <IconButton label="Hủy job" icon={<Ban size={14} />} loading={actions.busy === `cancel:${j.id}`} onClick={() => void actions.cancelJob(j)} /> : null}
         {canRetry ? <IconButton label="Tạo lại" icon={<RotateCcw size={14} />} onClick={() => void actions.retryJobs([j])} /> : null}
-        {j.status === "completed" || j.status === "failed" ? <IconButton label="Tạo phiên bản mới" icon={<GitBranchPlus size={14} />} onClick={() => open(j, "regenerate")} /> : null}
+        {j.status === "completed" || j.status === "failed" ? <IconButton label={j.kind === "image" ? "Sửa prompt & tạo lại ảnh" : "Tạo phiên bản mới"} icon={<GitBranchPlus size={14} />} onClick={() => open(j, "regenerate")} /> : null}
       </div>
     );
   };
@@ -210,7 +210,7 @@ export function JobsManager({ batch }: { batch: Batch }) {
                   {truncate(j.prompt, 110)}
                 </div>
                 <div className="job-card-meta muted tiny">
-                  <span>{fmtSeconds(j.output?.durationSec ?? j.config.durationSec)}</span>
+                  {j.kind === "image" ? null : <span>{fmtSeconds(j.output?.durationSec ?? j.config.durationSec)}</span>}
                   <span>{j.config.aspectRatio}</span>
                   <span>
                     lần {j.attempt}/{j.maxAttempts}
@@ -265,7 +265,7 @@ export function JobsManager({ batch }: { batch: Batch }) {
                     <code className="tiny">{j.modelId}</code>
                   </td>
                   <td className="col-narrow" data-label="Thời lượng">
-                    {fmtSeconds(j.output?.durationSec ?? j.config.durationSec)}
+                    {j.kind === "image" ? null : fmtSeconds(j.output?.durationSec ?? j.config.durationSec)}
                     <div className="muted tiny">{j.config.aspectRatio}</div>
                   </td>
                   <td className="col-narrow" data-label="Trạng thái">

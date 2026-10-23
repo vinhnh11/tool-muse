@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
-import { BookmarkCheck, BookmarkMinus, BookmarkPlus, Download, FileArchive, Film, Library, RefreshCw, Trash2, X } from "lucide-react";
-import { api, exportUrls, type LibraryItem } from "../api";
+import { BookmarkCheck, BookmarkMinus, BookmarkPlus, Download, FileArchive, Film, Image as ImageIcon, Library, RefreshCw, Trash2, X } from "lucide-react";
+import { api, exportUrls, type BatchKind, type LibraryItem } from "../api";
 import { VersionBadge } from "../components/Badge";
 import { Button, IconButton, LinkButton } from "../components/Button";
 import { EmptyState, ErrorBanner } from "../components/EmptyState";
@@ -10,6 +10,7 @@ import { Segmented } from "../components/Tabs";
 import { VideoPlayer } from "../components/VideoPlayer";
 import { useApi, useLocalStorage } from "../hooks/useApi";
 import { useRealtimeRefetch } from "../hooks/useEvents";
+import { useStudio } from "../state/studio";
 import { fmtBytes, fmtDate, fmtSeconds, truncate } from "../labels";
 import { useJobActions } from "./batch/useJobActions";
 
@@ -20,7 +21,8 @@ interface Group {
   items: LibraryItem[];
 }
 
-function Preview({ item, onClose, onToggleLibrary, onDelete }: { item: LibraryItem; onClose: () => void; onToggleLibrary: () => void; onDelete: () => void }) {
+function Preview({ item, onClose, onToggleLibrary, onDelete, onUseAsReference }: { item: LibraryItem; onClose: () => void; onToggleLibrary: () => void; onDelete: () => void; onUseAsReference: () => void }) {
+  const isImage = item.kindOf === "image";
   return (
     <Modal
       open
@@ -31,19 +33,24 @@ function Preview({ item, onClose, onToggleLibrary, onDelete }: { item: LibraryIt
       footer={
         <>
           <Button variant="danger" icon={<Trash2 size={15} />} onClick={onDelete}>
-            Xóa video
+            {isImage ? "Xóa ảnh" : "Xóa video"}
           </Button>
+          {isImage ? (
+            <Button icon={<Film size={15} />} onClick={onUseAsReference} title="Mở trang tạo video với ảnh này làm ảnh khung đầu (ảnh → video)">
+              Dùng làm ảnh tham chiếu
+            </Button>
+          ) : null}
           <Button icon={item.inLibrary ? <BookmarkMinus size={15} /> : <BookmarkPlus size={15} />} onClick={onToggleLibrary}>
             {item.inLibrary ? "Bỏ khỏi Thư viện" : "Thêm vào Thư viện"}
           </Button>
           <LinkButton variant="primary" href={item.urls.download} icon={<Download size={15} />}>
-            Tải video
+            {isImage ? "Tải ảnh" : "Tải video"}
           </LinkButton>
         </>
       }
     >
       <div className="preview-layout">
-        <VideoPlayer src={item.urls.preview} poster={item.urls.thumbnail} download={item.urls.download} autoPlay />
+        {isImage ? <img className="image-viewer" src={item.urls.file} alt={item.prompt ?? item.fileName} /> : <VideoPlayer src={item.urls.preview} poster={item.urls.thumbnail} download={item.urls.download} autoPlay />}
         <div className="preview-meta">
           <div className="chip-row">
             <VersionBadge version={item.version} />
@@ -54,8 +61,17 @@ function Preview({ item, onClose, onToggleLibrary, onDelete }: { item: LibraryIt
             ) : null}
           </div>
           <dl className="kv">
-            <dt>Thời lượng</dt>
-            <dd>{fmtSeconds(item.durationSec)}</dd>
+            {isImage ? (
+              <>
+                <dt>Tỉ lệ</dt>
+                <dd>{item.aspectRatio ?? "-"}</dd>
+              </>
+            ) : (
+              <>
+                <dt>Thời lượng</dt>
+                <dd>{fmtSeconds(item.durationSec)}</dd>
+              </>
+            )}
             <dt>Kích thước</dt>
             <dd>
               {item.width && item.height ? `${item.width}×${item.height} · ` : ""}
@@ -66,7 +82,7 @@ function Preview({ item, onClose, onToggleLibrary, onDelete }: { item: LibraryIt
           </dl>
           {item.prompt ? (
             <div className="prompt-box">
-              <div className="field-label">Prompt</div>
+              <div className="field-label">Prompt đã dùng</div>
               <p>{item.prompt}</p>
             </div>
           ) : null}
@@ -79,9 +95,26 @@ function Preview({ item, onClose, onToggleLibrary, onDelete }: { item: LibraryIt
 export function LibraryPage() {
   const [libraryOnly, setLibraryOnly] = useLocalStorage<boolean>("bvs.library.only", false);
   const [groupBy, setGroupBy] = useLocalStorage<"batch" | "session">("bvs.library.group", "batch");
-  const lib = useApi(() => api.library(libraryOnly).then((r) => r.items), [libraryOnly]);
+  const [kind, setKind] = useLocalStorage<BatchKind | "all">("bvs.library.kind", "video");
+  const { navigate } = useStudio();
+  const lib = useApi(() => api.library(libraryOnly, kind).then((r) => r.items), [libraryOnly, kind]);
   useRealtimeRefetch((ev) => ev.type === "local.library" || ev.type === "asset.deleted" || ev.type === "batch.deleted" || (ev.type === "job.status" && ev.to === "completed"), () => void lib.reload(), 800);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const noun = kind === "image" ? "ảnh" : kind === "all" ? "mục" : "video";
+
+  /** Đưa ảnh sang batch video (ảnh → video): ghi vào cấu hình video đã lưu rồi mở trang Batch */
+  const useAsReference = (it: LibraryItem) => {
+    try {
+      const raw = localStorage.getItem("bvs.batch.config");
+      const cur = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+      localStorage.setItem("bvs.batch.config", JSON.stringify({ ...cur, referenceAssetIds: [it.id], mode: "image-to-video" }));
+      localStorage.setItem("bvs.batch.kind", JSON.stringify("video"));
+    } catch {
+      /* bỏ qua: người dùng chọn tay ở trang Batch */
+    }
+    setPreview(null);
+    navigate("batch");
+  };
   const [preview, setPreview] = useState<LibraryItem | null>(null);
   const actions = useJobActions();
 
@@ -106,6 +139,7 @@ export function LibraryPage() {
     });
 
   const ids = [...selected];
+  const hasImage = (lib.data ?? []).some((i) => selected.has(i.id) && i.kindOf === "image");
   const setLib = async (assetIds: string[], inLibrary: boolean) => {
     await actions.addToLibrary(assetIds, inLibrary);
     await lib.reload();
@@ -128,10 +162,23 @@ export function LibraryPage() {
       <section className="card">
         <div className="card-head">
           <div className="card-title">
-            <Library size={16} aria-hidden /> Thư viện video
-            {lib.data ? <span className="muted small">· {lib.data.length} video</span> : null}
+            <Library size={16} aria-hidden /> Thư viện
+            {lib.data ? <span className="muted small">· {lib.data.length} {noun}</span> : null}
           </div>
           <div className="card-head-actions">
+            <Segmented
+              ariaLabel="Loại"
+              value={kind}
+              onChange={(v) => {
+                setKind(v);
+                setSelected(new Set());
+              }}
+              options={[
+                { id: "video", label: "Video" },
+                { id: "image", label: "Ảnh" },
+                { id: "all", label: "Tất cả" },
+              ]}
+            />
             <Toggle checked={libraryOnly} onChange={setLibraryOnly} label="Chỉ mục đã thêm vào thư viện" />
             <Segmented
               ariaLabel="Nhóm theo"
@@ -149,17 +196,17 @@ export function LibraryPage() {
         <div className={`bulk-bar${selected.size ? " is-on" : ""}`}>
           {selected.size ? (
             <>
-              <span className="small">{selected.size} video đã chọn</span>
+              <span className="small">{selected.size} {noun} đã chọn</span>
               <Button size="sm" icon={<FileArchive size={14} />} loading={actions.busy === "zip"} onClick={() => void actions.downloadZip(ids, "thu-vien")}>
                 Tải ZIP
               </Button>
-              <Button size="sm" variant="primary" icon={<Film size={14} />} loading={actions.busy === "merge"} disabled={selected.size < 2} onClick={() => void actions.mergeVideos(ids).then(async (ok) => { if (ok) { setSelected(new Set()); await lib.reload(); } })}>
+              <Button size="sm" variant="primary" icon={<Film size={14} />} loading={actions.busy === "merge"} disabled={selected.size < 2 || hasImage} title={hasImage ? "Chỉ ghép được video" : undefined} onClick={() => void actions.mergeVideos(ids).then(async (ok) => { if (ok) { setSelected(new Set()); await lib.reload(); } })}>
                 Ghép thành 1 video
               </Button>
-              <Button size="sm" icon={<Film size={14} />} loading={actions.busy === "autoedit"} disabled={selected.size < 2} onClick={() => void actions.autoEdit(ids, window.prompt("Yêu cầu dựng cho AI (để trống = tự quyết):", "") || undefined).then(async (ok) => { if (ok) { setSelected(new Set()); await lib.reload(); } })}>
+              <Button size="sm" icon={<Film size={14} />} loading={actions.busy === "autoedit"} disabled={selected.size < 2 || hasImage} onClick={() => void actions.autoEdit(ids, window.prompt("Yêu cầu dựng cho AI (để trống = tự quyết):", "") || undefined).then(async (ok) => { if (ok) { setSelected(new Set()); await lib.reload(); } })}>
                 AI tự dựng
               </Button>
-              <Button size="sm" variant="primary" icon={<Film size={14} />} disabled={selected.size < 2} onClick={() => void actions.proEdit(ids, window.prompt("Yêu cầu dựng nâng cao (tiêu đề, caption, phong cách...). Để trống = tự quyết:", "") || undefined).then((ok) => { if (ok) setSelected(new Set()); })}>
+              <Button size="sm" variant="primary" icon={<Film size={14} />} disabled={selected.size < 2 || hasImage} onClick={() => void actions.proEdit(ids, window.prompt("Yêu cầu dựng nâng cao (tiêu đề, caption, phong cách...). Để trống = tự quyết:", "") || undefined).then((ok) => { if (ok) setSelected(new Set()); })}>
                 Dựng nâng cao (Claude Code)
               </Button>
               <Button size="sm" icon={<BookmarkPlus size={14} />} onClick={() => void setLib(ids, true)}>
@@ -174,14 +221,14 @@ export function LibraryPage() {
               <IconButton label="Bỏ chọn" icon={<X size={14} />} onClick={() => setSelected(new Set())} />
             </>
           ) : (
-            <span className="muted small">Chọn video để tải ZIP hoặc quản lý thư viện. Video đã tạo xong tự xuất hiện ở đây.</span>
+            <span className="muted small">Chọn {noun} để tải ZIP hoặc quản lý thư viện. Kết quả đã tạo xong tự xuất hiện ở đây.</span>
           )}
         </div>
 
         {lib.error ? <ErrorBanner error={lib.error} onRetry={lib.reload} /> : null}
         {lib.loading ? <div className="skeleton" style={{ height: 200 }} /> : null}
         {lib.data && !lib.data.length ? (
-          <EmptyState icon={<Film size={22} />} title={libraryOnly ? "Chưa có video nào được thêm vào thư viện" : "Chưa có video nào được tạo"} description={libraryOnly ? "Tắt bộ lọc để xem mọi video đã tạo, hoặc bấm “Thêm vào Thư viện” ở trình xem video." : "Tạo và duyệt một batch ở Batch Studio."} />
+          <EmptyState icon={kind === "image" ? <ImageIcon size={22} /> : <Film size={22} />} title={libraryOnly ? `Chưa có ${noun} nào được thêm vào thư viện` : `Chưa có ${noun} nào được tạo`} description={libraryOnly ? "Tắt bộ lọc để xem mọi video đã tạo, hoặc bấm “Thêm vào Thư viện” ở trình xem video." : "Tạo và duyệt một batch ở Batch Studio."} />
         ) : null}
 
         {groups.map((g) => {
@@ -205,11 +252,11 @@ export function LibraryPage() {
                   }
                 />
                 <h3 className="lib-group-title">{g.title}</h3>
-                <span className="muted small">{g.items.length} video</span>
+                <span className="muted small">{g.items.length} {noun}</span>
                 <span className="spacer" />
                 {g.batchId ? (
                   <div className="btn-group" role="group" aria-label="Xuất batch">
-                    <LinkButton size="sm" href={exportUrls.batch(g.batchId, "zip")} icon={<Download size={14} />}>
+                    <LinkButton size="sm" href={g.items.every((i) => i.kindOf === "image") ? exportUrls.batchZip(g.batchId) : exportUrls.batch(g.batchId, "zip")} icon={<Download size={14} />}>
                       ZIP
                     </LinkButton>
                     <LinkButton size="sm" href={exportUrls.batch(g.batchId, "csv")}>
@@ -228,7 +275,7 @@ export function LibraryPage() {
                   variant="danger"
                   icon={<Trash2 size={14} />}
                   loading={actions.busy === "delete"}
-                  onClick={() => void removeAssets(g.items.map((i) => i.id), `Toàn bộ ${g.items.length} video của "${g.title}"`)}
+                  onClick={() => void removeAssets(g.items.map((i) => i.id), `Toàn bộ ${g.items.length} ${noun} của "${g.title}"`)}
                 >
                   Xóa nhóm
                 </Button>
@@ -238,8 +285,10 @@ export function LibraryPage() {
                   <article key={it.id} className={`lib-card${selected.has(it.id) ? " is-selected" : ""}`} title={it.prompt ?? it.fileName}>
                     <button type="button" className="lib-thumb" onClick={() => setPreview(it)} aria-label={`Xem ${it.fileName}`}>
                       <img src={it.urls.thumbnail} alt="" loading="lazy" onError={(e) => ((e.target as HTMLImageElement).style.visibility = "hidden")} />
-                      <span className="thumb-play" aria-hidden />
-                      <span className="asset-duration mono">{fmtSeconds(it.durationSec)}</span>
+                      {it.kindOf === "image" ? <span className="asset-duration mono">{it.aspectRatio ?? "ảnh"}</span> : (<>
+                        <span className="thumb-play" aria-hidden />
+                        <span className="asset-duration mono">{fmtSeconds(it.durationSec)}</span>
+                      </>)}
                     </button>
                     <div className="lib-overlay">
                       <Checkbox ariaLabel={`Chọn ${it.fileName}`} checked={selected.has(it.id)} onChange={(on) => toggle(it.id, on)} />
@@ -266,6 +315,7 @@ export function LibraryPage() {
             void setLib([preview.id], next).then(() => setPreview({ ...preview, inLibrary: next }));
           }}
           onDelete={() => void removeAssets([preview.id], preview.fileName)}
+          onUseAsReference={() => useAsReference(preview)}
         />
       ) : null}
       {actions.dialog}

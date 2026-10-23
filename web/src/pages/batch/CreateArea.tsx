@@ -8,13 +8,18 @@ import { fmtBytes, fmtNumber } from "../../labels";
 
 export type CreateTab = "single" | "list" | "file" | "ai";
 
+export const IMAGE_LIST_PLACEHOLDER = `Mỗi dòng là MỘT prompt ảnh. Ví dụ:
+Chai serum thủy tinh hổ phách đặt trên nền đá cẩm thạch trắng, ánh sáng studio mềm, ảnh sản phẩm thương mại
+Cô gái thoa serum trước gương phòng tắm buổi sáng, ánh nắng ấm, ảnh lifestyle
+Flat lay chai serum cùng hoa khô và vải lanh, tông pastel`;
+
 export const LIST_PLACEHOLDER = `Mỗi dòng là MỘT prompt = MỘT video. Ví dụ:
 Cận cảnh chai serum xoay chậm trên nền đá cẩm thạch, ánh sáng studio mềm, 9:16
 Cô gái thoa serum lên má trước gương phòng tắm buổi sáng, ánh nắng ấm
 Sản phẩm rơi vào mặt nước, giọt nước bắn chậm, ánh sáng xanh mát`;
 
 /** Bộ đếm dòng trực tiếp: "50 dòng → 50 video", dòng trống, trùng, gần trùng */
-export function LineCounter({ parse, loading, error, variants, onClean }: { parse: ParseResult | null; loading: boolean; error: ApiError | null; variants: number; onClean?: () => void }) {
+export function LineCounter({ parse, loading, error, variants, onClean, unit = "video" }: { parse: ParseResult | null; loading: boolean; error: ApiError | null; variants: number; onClean?: () => void; unit?: string }) {
   if (error) return <ErrorBanner error={error} compact />;
   if (!parse)
     return loading ? (
@@ -34,11 +39,11 @@ export function LineCounter({ parse, loading, error, variants, onClean }: { pars
         <span className="lc-big">
           {variants > 1 ? (
             <>
-              {fmtNumber(valid)} prompt × {variants} lần → <strong>{fmtNumber(videos)} video</strong>
+              {fmtNumber(valid)} prompt × {variants} lần → <strong>{fmtNumber(videos)} {unit}</strong>
             </>
           ) : (
             <>
-              {fmtNumber(valid)} dòng → <strong>{fmtNumber(videos)} video</strong>
+              {fmtNumber(valid)} dòng → <strong>{fmtNumber(videos)} {unit}</strong>
             </>
           )}
         </span>

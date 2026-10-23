@@ -3490,3 +3490,21 @@ input[type="number"]::-webkit-inner-spin-button {
 .ref-cell:hover .ref-del, .ref-del:focus-visible { opacity: 1; }
 .ref-del:hover { background: #c0392b; }
 @media (hover: none) { .ref-del { opacity: 1; } }
+
+/* ---- Tạo ảnh hàng loạt ---- */
+.kind-switch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.image-viewer {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  margin: 0 auto;
+  border-radius: 8px;
+  object-fit: contain;
+  background: rgba(127, 127, 127, 0.1);
+}

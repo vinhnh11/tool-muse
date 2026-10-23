@@ -104,6 +104,7 @@ export function PromptSetPanel({
   useItemOverrides,
   setUseItemOverrides,
   onDeploy,
+  kind = "video",
 }: {
   set: PromptSet | null;
   loading: boolean;
@@ -118,7 +119,10 @@ export function PromptSetPanel({
   setUseItemOverrides: (v: boolean) => void;
   /** Mở dialog TRIỂN KHAI: mỗi prompt = 1 video */
   onDeploy: () => void;
+  kind?: "video" | "image";
 }) {
+  const isImage = kind === "image";
+  const unit = isImage ? "ảnh" : "video";
   const { sessionId, activeSetId, setActiveSetId } = useStudio();
   const toast = useToast();
   const dialogs = useDialogs();
@@ -164,11 +168,11 @@ export function PromptSetPanel({
   const approveMany = (ids: string[] | "all", approval: Approval) => run("bulk", () => api.setApproval(set!.id, ids, approval), approval === "approved" ? "Đã duyệt" : approval === "rejected" ? "Đã loại" : "Đã đặt lại");
 
   const rewrite = async (item: PromptItem) => {
-    if (!cfg.provider || !cfg.model) return toast.error("Chọn provider/model ở Cấu hình video trước.");
+    if (!cfg.provider || !cfg.model) return toast.error(`Chọn provider ở Cấu hình ${isImage ? "ảnh" : "video"} trước.`);
     const instruction = await dialogs.prompt({
       title: `AI viết lại prompt #${item.index}`,
       label: "Hướng dẫn cho AI",
-      placeholder: "vd: thêm hook mạnh 2 giây đầu, đổi bối cảnh sang quán cà phê, ngắn gọn hơn",
+      placeholder: isImage ? "vd: đổi bối cảnh sang quán cà phê, ánh sáng ấm hơn, ngắn gọn hơn" : "vd: thêm hook mạnh 2 giây đầu, đổi bối cảnh sang quán cà phê, ngắn gọn hơn",
       initial: "Viết lại hay hơn, khác biệt hơn",
       multiline: true,
       required: true,
@@ -228,16 +232,16 @@ export function PromptSetPanel({
               variant="primary"
               icon={<Rocket size={15} />}
               disabled={!deployCount || !cfg.provider || !cfg.model}
-              title={!cfg.provider || !cfg.model ? "Chọn provider/model ở Cấu hình video trước" : `${deployCount} prompt → ${deployCount} video`}
+              title={!cfg.provider || !cfg.model ? `Chọn provider ở Cấu hình ${isImage ? "ảnh" : "video"} trước` : `${deployCount} prompt → ${isImage ? deployCount * cfg.state.variantsPerPrompt : deployCount} ${unit}`}
               onClick={onDeploy}
             >
-              Triển khai {deployCount} video
+              Triển khai {isImage ? deployCount * cfg.state.variantsPerPrompt : deployCount} {unit}
             </Button>
           </div>
           <div className="set-options">
             <Toggle checked={useSet} onChange={setUseSet} label="Dùng bộ prompt này để tạo batch" />
             <Toggle checked={onlyApproved} onChange={setOnlyApproved} label="Chỉ dùng prompt đã duyệt" description={onlyApproved ? `${counts.approved} prompt sẽ được dùng` : `${counts.pending + counts.approved} prompt (bỏ prompt đã loại)`} />
-            <Toggle checked={useItemOverrides} onChange={setUseItemOverrides} label="Giữ thời lượng/tỷ lệ riêng của từng prompt" description={durationMismatch && useItemOverrides ? `${durationMismatch} prompt có thời lượng khác cấu hình (${fmtSeconds(cfg.state.durationSec)})` : undefined} />
+            <Toggle checked={useItemOverrides} onChange={setUseItemOverrides} label={isImage ? "Giữ tỉ lệ riêng của từng prompt" : "Giữ thời lượng/tỷ lệ riêng của từng prompt"} description={!isImage && durationMismatch && useItemOverrides ? `${durationMismatch} prompt có thời lượng khác cấu hình (${fmtSeconds(cfg.state.durationSec)})` : undefined} />
           </div>
           <div className="toolbar">
             <div className="chip-row">
@@ -293,7 +297,7 @@ export function PromptSetPanel({
                     <th className="col-num">#</th>
                     <th>Tiêu đề</th>
                     <th>Prompt</th>
-                    <th className="col-narrow">Thời lượng</th>
+                    {isImage ? null : <th className="col-narrow">Thời lượng</th>}
                     <th className="col-narrow">Tỷ lệ</th>
                     <th className="col-narrow">Trạng thái</th>
                     <th className="col-actions">Thao tác</th>
@@ -345,9 +349,11 @@ export function PromptSetPanel({
                             </button>
                           ) : null}
                         </td>
-                        <td className="col-narrow" data-label="Thời lượng">
-                          {it.durationSec !== null ? fmtSeconds(it.durationSec) : <span className="muted">theo batch</span>}
-                        </td>
+                        {isImage ? null : (
+                          <td className="col-narrow" data-label="Thời lượng">
+                            {it.durationSec !== null ? fmtSeconds(it.durationSec) : <span className="muted">theo batch</span>}
+                          </td>
+                        )}
                         <td className="col-narrow" data-label="Tỷ lệ">
                           {it.aspectRatio ?? <span className="muted">theo batch</span>}
                         </td>

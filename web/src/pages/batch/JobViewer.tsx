@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, Check, Columns2, Download, Film, GitBranchPlus, History, Info, Library, Loader2, Play, RotateCcw, Send, Ban } from "lucide-react";
-import { api, asApiError, TERMINAL_JOB_STATUSES, type ApiError, type Batch, type Job } from "../../api";
+import { api, asApiError, IMAGE_ASPECT_RATIOS, TERMINAL_JOB_STATUSES, type ApiError, type Batch, type Job } from "../../api";
 import { JobStatusBadge, VersionBadge } from "../../components/Badge";
 import { Button, LinkButton } from "../../components/Button";
 import { EmptyState, ErrorBanner, Loading } from "../../components/EmptyState";
@@ -19,6 +19,7 @@ import { useJobActions } from "./useJobActions";
 export type ViewerTab = "info" | "versions" | "regenerate" | "events";
 
 function VideoOrPlaceholder({ job, autoPlay }: { job: Job; autoPlay?: boolean }) {
+  if (job.output && job.kind === "image") return <img className="image-viewer" src={job.output.preview} alt={job.prompt} />;
   if (job.output) return <VideoPlayer src={job.output.preview} poster={job.output.thumbnail} download={job.output.download} title={`Job #${job.seq} V${job.version}`} autoPlay={autoPlay} />;
   const active = job.status === "processing" || job.status === "submitting";
   return (
@@ -26,7 +27,7 @@ function VideoOrPlaceholder({ job, autoPlay }: { job: Job; autoPlay?: boolean })
       {active ? <Loader2 size={24} className="spin" /> : job.status === "failed" ? <AlertTriangle size={24} className="text-danger" /> : <Film size={24} />}
       <JobStatusBadge status={job.status} />
       {active ? <ProgressBar value={job.status === "submitting" ? null : job.progress} /> : null}
-      <span className="muted small">{job.status === "failed" ? "Job lỗi - chưa có video" : job.status === "cancelled" ? "Job đã hủy" : "Video sẽ hiện ngay khi provider tạo xong"}</span>
+      <span className="muted small">{job.status === "failed" ? (job.kind === "image" ? "Job lỗi - chưa có ảnh" : "Job lỗi - chưa có video") : job.status === "cancelled" ? "Job đã hủy" : job.kind === "image" ? "Ảnh sẽ hiện ngay khi Muse tạo xong" : "Video sẽ hiện ngay khi provider tạo xong"}</span>
     </div>
   );
 }
@@ -59,7 +60,7 @@ function InfoTab({ job, batch }: { job: Job; batch: Batch }) {
         <div className="viewer-actions">
           {job.output ? (
             <LinkButton href={job.output.download} icon={<Download size={15} />} variant="primary">
-              Tải video
+              {job.kind === "image" ? "Tải ảnh" : "Tải video"}
             </LinkButton>
           ) : null}
           {job.output ? (
@@ -67,7 +68,7 @@ function InfoTab({ job, batch }: { job: Job; batch: Batch }) {
               Thêm vào Thư viện
             </Button>
           ) : null}
-          {job.output ? (
+          {job.output && job.kind !== "image" ? (
             <Button icon={<Send size={15} />} loading={sending} onClick={() => void sendToEdit()}>
               Đưa sang chỉnh sửa
             </Button>
@@ -104,9 +105,9 @@ function InfoTab({ job, batch }: { job: Job; batch: Batch }) {
           </dd>
           <dt>Cấu hình</dt>
           <dd>
-            {MODE_LABEL[job.config.mode]} · {fmtSeconds(job.config.durationSec)} · {job.config.aspectRatio} · {job.config.resolution}
-            {job.config.audio ? " · âm thanh" : ""}
-            {job.config.quality ? ` · ${QUALITY_LABEL[job.config.quality] ?? job.config.quality}` : ""}
+            {job.kind === "image" ? job.config.aspectRatio : `${MODE_LABEL[job.config.mode]} · ${fmtSeconds(job.config.durationSec)} · ${job.config.aspectRatio} · ${job.config.resolution}`}
+            {job.kind !== "image" && job.config.audio ? " · âm thanh" : ""}
+            {job.kind !== "image" && job.config.quality ? ` · ${QUALITY_LABEL[job.config.quality] ?? job.config.quality}` : ""}
           </dd>
           <dt>Lần thử</dt>
           <dd>
@@ -115,7 +116,7 @@ function InfoTab({ job, batch }: { job: Job; batch: Batch }) {
           </dd>
           <dt>Chi phí</dt>
           <dd>
-            ước tính {fmtCost(job.estimatedCost, batch.currency)} · thực tế {job.actualCost === null ? "chưa có" : fmtCost(job.actualCost, batch.currency)}
+            {job.kind === "image" ? "tiêu hạn mức nick Muse" : `ước tính ${fmtCost(job.estimatedCost, batch.currency)} · thực tế ${job.actualCost === null ? "chưa có" : fmtCost(job.actualCost, batch.currency)}`}
           </dd>
           {job.output?.durationSec ? (
             <>
@@ -272,7 +273,7 @@ function RegenerateTab({ job, batch, onCreated }: { job: Job; batch: Batch; onCr
       const created = await api.regenerateJob(job.id, {
         prompt: prompt.trim(),
         ...(model?.negativePrompt ? { negative: negative.trim() || null } : {}),
-        ...(Number.isFinite(d) ? { durationSec: d } : {}),
+        ...(Number.isFinite(d) && job.kind !== "image" ? { durationSec: d } : {}),
         aspectRatio: ratio,
       });
       onCreated(created);
@@ -291,17 +292,17 @@ function RegenerateTab({ job, batch, onCreated }: { job: Job; batch: Batch; onCr
       <Field label={`Prompt (${prompt.length}${model ? `/${model.maxPromptChars}` : ""} ký tự)`}>
         <TextArea rows={7} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
       </Field>
-      {model?.negativePrompt ? (
+      {model?.negativePrompt && job.kind !== "image" ? (
         <Field label="Negative prompt">
           <TextArea rows={2} value={negative} onChange={(e) => setNegative(e.target.value)} />
         </Field>
       ) : null}
       <div className="grid-2">
-        <Field label="Thời lượng (giây)" hint={model ? `Model hỗ trợ ${model.durations.min}-${model.durations.max}s${model.durations.auto ? ", -1 = tự chọn" : ""}` : undefined}>
+        {job.kind === "image" ? null : <Field label="Thời lượng (giây)" hint={model ? `Model hỗ trợ ${model.durations.min}-${model.durations.max}s${model.durations.auto ? ", -1 = tự chọn" : ""}` : undefined}>
           <Input type="number" value={duration} onChange={(e) => setDuration(e.target.value)} />
-        </Field>
+        </Field>}
         <Field label="Tỷ lệ khung">
-          {model ? <Select value={ratio} onChange={(e) => setRatio(e.target.value)} options={model.aspectRatios.map((r) => ({ value: r, label: r }))} /> : <Input value={ratio} onChange={(e) => setRatio(e.target.value)} />}
+          {job.kind === "image" ? <Select value={ratio} onChange={(e) => setRatio(e.target.value)} options={IMAGE_ASPECT_RATIOS.map((r) => ({ value: r, label: r }))} /> : model ? <Select value={ratio} onChange={(e) => setRatio(e.target.value)} options={model.aspectRatios.map((r) => ({ value: r, label: r }))} /> : <Input value={ratio} onChange={(e) => setRatio(e.target.value)} />}
         </Field>
       </div>
       {batch.status === "awaiting_approval" ? <div className="banner banner-warning">Batch này chưa được duyệt - duyệt batch trước khi chạy phiên bản mới.</div> : null}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Ban, Download, FolderKanban, Pause, Play, PlayCircle, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
-import { api, exportUrls, JOB_STATUSES, PENDING_JOB_STATUSES, type Batch } from "../../api";
+import { api, exportUrls, JOB_STATUSES, PENDING_JOB_STATUSES, type Batch, type BatchKind } from "../../api";
 import { BatchStatusBadge, MockBadge } from "../../components/Badge";
 import { Button, LinkButton } from "../../components/Button";
 import { useDialogs } from "../../components/ConfirmDialog";
@@ -16,6 +16,8 @@ import { JobsManager } from "./JobsManager";
 import { useJobActions } from "./useJobActions";
 
 function BatchHeader({ batch, reload, onDeleted }: { batch: Batch; reload: () => void; onDeleted: () => void }) {
+  const isImage = batch.kind === "image";
+  const unit = isImage ? "ảnh" : "video";
   const { openApproval } = useStudio();
   const toast = useToast();
   const dialogs = useDialogs();
@@ -66,8 +68,8 @@ function BatchHeader({ batch, reload, onDeleted }: { batch: Batch; reload: () =>
             {batch.providerType === "mock" ? <MockBadge /> : null}
           </div>
           <div className="muted small">
-            {batch.providerName ?? batch.providerConfigId} · <code>{batch.modelId}</code> · {MODE_LABEL[batch.config.mode]} · {fmtSeconds(batch.config.durationSec)} · {batch.config.aspectRatio} · {batch.config.resolution}{batch.fbPage ? ` · Đăng lên: ${batch.fbPage === "none" ? "không đăng" : batch.fbPage.name}` : ""}
-            {batch.config.audio ? " · âm thanh" : ""} · tạo {fmtRelative(batch.createdAt)}
+            {batch.providerName ?? batch.providerConfigId} · <code>{batch.modelId}</code> · {isImage ? `${batch.config.aspectRatio} · ${batch.config.variantsPerPrompt} ảnh/prompt` : `${MODE_LABEL[batch.config.mode]} · ${fmtSeconds(batch.config.durationSec)} · ${batch.config.aspectRatio} · ${batch.config.resolution}`}{!isImage && batch.fbPage ? ` · Đăng lên: ${batch.fbPage === "none" ? "không đăng" : batch.fbPage.name}` : ""}
+            {!isImage && batch.config.audio ? " · âm thanh" : ""} · tạo {fmtRelative(batch.createdAt)}
           </div>
         </div>
         <div className="batch-actions">
@@ -105,20 +107,20 @@ function BatchHeader({ batch, reload, onDeleted }: { batch: Batch; reload: () =>
             <Button
               icon={<Trash2 size={15} />}
               loading={actions.busy === "delete"}
-              title="Xóa batch nhưng giữ video trong Thư viện"
+              title={`Xóa batch nhưng giữ ${unit} trong Thư viện`}
               onClick={() => void actions.deleteBatch(batch, true).then((ok) => ok && onDeleted())}
             >
-              Xóa batch (giữ video)
+              Xóa batch (giữ {unit})
             </Button>
           ) : null}
           <Button
             variant="danger"
             icon={<Trash2 size={15} />}
             loading={actions.busy === "delete"}
-            title="Xóa batch, job và mọi video đã tạo"
+            title={`Xóa batch, job và mọi ${unit} đã tạo`}
             onClick={() => void actions.deleteBatch(batch, false).then((ok) => ok && onDeleted())}
           >
-            Xóa batch + video
+            Xóa batch + {unit}
           </Button>
         </div>
       </div>
@@ -129,7 +131,7 @@ function BatchHeader({ batch, reload, onDeleted }: { batch: Batch; reload: () =>
         <div className="batch-progress-text">
           <strong>{batch.progress}%</strong>
           <span className="muted">
-            {done}/{batch.total} job đã kết thúc · {batch.counts.completed ?? 0} video xong
+            {done}/{batch.total} job đã kết thúc · {batch.counts.completed ?? 0} {unit} xong
           </span>
         </div>
       </div>
@@ -144,6 +146,7 @@ function BatchHeader({ batch, reload, onDeleted }: { batch: Batch; reload: () =>
           ))}
         </div>
         <div className="cost-row">
+          {isImage ? <span className="muted">Tiêu hạn mức tuần của nick Muse, không tính tiền theo ảnh</span> : <>
           <span title="Ước tính trước khi chạy, theo đơn giá đã nhập">
             Chi phí <em>ước tính</em>: <strong>{fmtCost(batch.estimatedCost, batch.currency)}</strong>
           </span>
@@ -160,6 +163,7 @@ function BatchHeader({ batch, reload, onDeleted }: { batch: Batch; reload: () =>
               Ngân sách: <strong>{fmtCost(batch.budgetLimit, batch.currency)}</strong>
             </span>
           ) : null}
+          </>}
           <span>
             Luồng:{" "}
             <select
@@ -168,7 +172,7 @@ function BatchHeader({ batch, reload, onDeleted }: { batch: Batch; reload: () =>
               disabled={busy !== null}
               onChange={(e) => void act("conc", () => api.setBatchConcurrency(batch.id, Number(e.target.value)), `Đã đổi sang ${e.target.value} luồng`)}
             >
-              {[...new Set([1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 30, batch.maxConcurrency])].sort((a, b) => a - b).map((n) => (
+              {[...new Set(isImage ? [1, 2, 3, 4, 5, 6] : [1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 30, batch.maxConcurrency])].sort((a, b) => a - b).map((n) => (
                 <option key={n} value={n}>{n}</option>
               ))}
             </select>
@@ -179,8 +183,13 @@ function BatchHeader({ batch, reload, onDeleted }: { batch: Batch; reload: () =>
 
       <div className="export-row">
         <span className="muted small">Xuất:</span>
-        <LinkButton size="sm" href={exportUrls.batch(batch.id, "zip")} icon={<Download size={14} />} title="ZIP mọi video đã xong + manifest + prompt">
-          ZIP
+        {isImage ? (
+          <LinkButton size="sm" variant="primary" href={exportUrls.batchZip(batch.id)} icon={<Download size={14} />} title="ZIP mọi ảnh đã xong">
+            Tải ZIP ảnh
+          </LinkButton>
+        ) : null}
+        <LinkButton size="sm" href={exportUrls.batch(batch.id, "zip")} icon={<Download size={14} />} title={isImage ? "ZIP ảnh + manifest + prompt" : "ZIP mọi video đã xong + manifest + prompt"}>
+          {isImage ? "ZIP + prompt" : "ZIP"}
         </LinkButton>
         <LinkButton size="sm" href={exportUrls.batch(batch.id, "csv")}>
           CSV
@@ -207,7 +216,7 @@ function BatchListItem({ b, active, onClick }: { b: Batch; active: boolean; onCl
       <ProgressBar value={b.progress} size="sm" tone={b.status === "completed" ? "success" : b.status === "paused" ? "warning" : "accent"} />
       <div className="batch-item-meta muted tiny">
         <span>
-          {b.counts.completed ?? 0}/{b.total} video
+          {b.counts.completed ?? 0}/{b.total} {b.kind === "image" ? "ảnh" : "video"}
         </span>
         {b.counts.failed ? <span className="text-danger">{b.counts.failed} lỗi</span> : null}
         <span>{b.modelId}</span>
@@ -217,11 +226,12 @@ function BatchListItem({ b, active, onClick }: { b: Batch; active: boolean; onCl
   );
 }
 
-export function BatchesSection() {
+export function BatchesSection({ kind = "video" }: { kind?: BatchKind }) {
+  const isImage = kind === "image";
   const { sessionId, selectedBatchId, setSelectedBatchId } = useStudio();
   const [scope, setScope] = useLocalStorage<"session" | "all">("bvs.batch.scope", "session");
   const filterSession = scope === "session" ? sessionId : null;
-  const list = useApi(() => api.batches(filterSession).then((r) => r.batches), [filterSession]);
+  const list = useApi(() => api.batches(filterSession, kind).then((r) => r.batches), [filterSession, kind]);
   const selected = useApi(() => (selectedBatchId ? api.batch(selectedBatchId) : Promise.resolve(null)), [selectedBatchId]);
 
   useRealtimeRefetch((ev) => ev.type.startsWith("batch.") || ev.type === "local.batch" || (ev.type === "job.status" && ev.batchId !== selectedBatchId), () => void list.reload(), 500);
@@ -231,8 +241,9 @@ export function BatchesSection() {
   // Tự chọn batch mới nhất nếu chưa chọn / batch cũ không còn
   useEffect(() => {
     if (!list.data) return;
-    if (!selectedBatchId && list.data[0]) setSelectedBatchId(list.data[0].id);
-  }, [list.data, selectedBatchId, setSelectedBatchId]);
+    if ((!selectedBatchId || (selected.data && (selected.data.kind ?? "video") !== kind)) && list.data[0]) setSelectedBatchId(list.data[0].id);
+    else if (selected.data && (selected.data.kind ?? "video") !== kind && !list.data[0]) setSelectedBatchId(null);
+  }, [list.data, selectedBatchId, setSelectedBatchId, selected.data, kind]);
   useEffect(() => {
     if (selected.error?.status === 404) setSelectedBatchId(list.data?.[0]?.id ?? null);
   }, [selected.error, list.data, setSelectedBatchId]);
@@ -241,7 +252,7 @@ export function BatchesSection() {
     <section className="card batches-card">
       <div className="card-head">
         <div className="card-title">
-          <FolderKanban size={16} aria-hidden /> Batch & video
+          <FolderKanban size={16} aria-hidden /> {isImage ? "Batch & ảnh" : "Batch & video"}
         </div>
         <div className="card-head-actions">
           <Segmented
@@ -282,7 +293,7 @@ export function BatchesSection() {
       ) : null}
 
       {selected.error && selected.error.status !== 404 ? <ErrorBanner error={selected.error} onRetry={selected.reload} /> : null}
-      {selected.data ? (
+      {selected.data && (selected.data.kind ?? "video") === kind ? (
         <div className="batch-detail">
           <BatchHeader
             batch={selected.data}

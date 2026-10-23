@@ -516,7 +516,8 @@ export class BatchService {
     if (!args.prompts.length) throw new AppError("NO_PROMPTS", "Chưa có prompt nào.", 400);
     if (args.prompts.length * config.variantsPerPrompt > 1000) throw new AppError("BATCH_TOO_LARGE", "Một batch tối đa 1000 ảnh.", 400);
     this.imageProvider(workspaceId, args.providerConfigId);
-    const prompts = args.prompts.map((p) => ({ ...p, durationSec: null, negative: null }));
+    // Ảnh không có thời lượng/negative; tỉ lệ riêng của prompt chỉ giữ nếu là tỉ lệ ảnh hợp lệ (bộ prompt video có thể mang 4:3...)
+    const prompts = args.prompts.map((p) => ({ ...p, durationSec: null, negative: null, aspectRatio: p.aspectRatio && (IMAGE_ASPECT_RATIOS as readonly string[]).includes(p.aspectRatio) ? p.aspectRatio : null }));
     const check = this.check(workspaceId, { providerConfigId: args.providerConfigId, modelId: IMAGE_MODEL_ID, config, prompts, blankLines: args.blankLines, lines: args.lines, kind: "image" });
     if (!check.ok) throw new AppError("BATCH_INVALID", "Danh sách prompt/cấu hình chưa hợp lệ - sửa các lỗi trước khi tạo batch (chưa gọi provider).", 422, check);
     const estimate = this.estimateImage(workspaceId, { providerConfigId: args.providerConfigId, imageCount: prompts.length * config.variantsPerPrompt, maxConcurrency });

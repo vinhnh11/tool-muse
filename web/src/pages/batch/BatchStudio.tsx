@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CircleDollarSign, FileText, List, PenLine, Rocket, ShieldCheck, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
-import { api, asApiError, type ApiError, type BatchCheck, type BatchEstimate, type BatchRequest, type GenerateResult, type ParseResult, type PromptInput } from "../../api";
+import { api, asApiError, IMAGE_MODEL_ID, type ApiError, type BatchCheck, type BatchEstimate, type BatchKind, type BatchRequest, type GenerateResult, type ParseResult, type PromptInput } from "../../api";
 import { Button } from "../../components/Button";
 import { CheckResultView, EstimateView } from "../../components/CheckResult";
 import { Banner, ErrorBanner } from "../../components/EmptyState";
 import { Field, Input, TextArea } from "../../components/Field";
-import { Tabs } from "../../components/Tabs";
+import { Segmented, Tabs } from "../../components/Tabs";
 import { useToast } from "../../components/Toast";
 import { useApi, useDebounced, useLocalStorage } from "../../hooks/useApi";
 import { emitLocal, useRealtimeRefetch } from "../../hooks/useEvents";
@@ -14,11 +14,14 @@ import { useStudio } from "../../state/studio";
 import { AiGenerateForm } from "./AiGenerateForm";
 import { BatchesSection } from "./BatchesSection";
 import { DeployDialog } from "./DeployDialog";
-import { FileImport, LineCounter, LIST_PLACEHOLDER, MakeSetButton, type CreateTab } from "./CreateArea";
+import { FileImport, IMAGE_LIST_PLACEHOLDER, LineCounter, LIST_PLACEHOLDER, MakeSetButton, type CreateTab } from "./CreateArea";
 import { FB_NONE, FbPageSelect, ShopeeUrlField, shopeeError, useFbPages } from "./FbPageSelect";
+import { ImageConfigPanel } from "./ImageConfigPanel";
 import { PromptSetPanel } from "./PromptSetPanel";
+import { useImageConfig } from "./useImageConfig";
 import { useVideoConfig } from "./useVideoConfig";
-import { ReferencePicker, VideoConfigPanel } from "./VideoConfigPanel";
+import { ReferenceGrid, ReferencePicker, VideoConfigPanel } from "./VideoConfigPanel";
+import { Image as ImageIcon, Video as VideoIcon } from "lucide-react";
 
 interface FileState {
   name: string;
@@ -68,7 +71,13 @@ function useParse(text: string, fileName: string | undefined, format: "txt" | un
 export function BatchStudio() {
   const { providers, sessionId, activeSetId, setActiveSetId, setSelectedBatchId, openApproval } = useStudio();
   const toast = useToast();
-  const cfg = useVideoConfig(providers);
+  const videoCfg = useVideoConfig(providers);
+  const imageCfg = useImageConfig(providers);
+  // Loại batch: Video | Ảnh (tách rõ). Mọi thành phần dưới đây dùng `cfg` = cấu hình của loại đang chọn
+  const [kind, setKind] = useLocalStorage<BatchKind>("bvs.batch.kind", "video");
+  const isImage = kind === "image";
+  const unit = isImage ? "ảnh" : "video";
+  const cfg = isImage ? imageCfg.asResolved : videoCfg;
   const [tab, setTab] = useLocalStorage<CreateTab>("bvs.batch.tab", "list");
   const [singleText, setSingleText] = useLocalStorage<string>("bvs.batch.single", "");
   const [listText, setListText] = useLocalStorage<string>("bvs.batch.list", "");
@@ -84,6 +93,16 @@ export function BatchStudio() {
   // Triển khai bộ prompt (mỗi prompt = 1 video). pendingAuto: sinh xong bằng AI → mở triển khai luôn
   const [deploy, setDeploy] = useState<{ setId: string; auto: boolean } | null>(null);
   const [pendingAuto, setPendingAuto] = useState<string | null>(null);
+
+  const prevKind = useRef(kind);
+  useEffect(() => {
+    if (prevKind.current !== kind) {
+      prevKind.current = kind;
+      setActiveSetId(null);
+      setResult(null);
+      setError(null);
+    }
+  }, [kind, setActiveSetId]);
 
   const set = useApi(() => (activeSetId ? api.promptSet(activeSetId) : Promise.resolve(null)), [activeSetId]);
   useRealtimeRefetch((ev) => Boolean(activeSetId) && ev.type === "local.promptSet", () => void set.reload(), 100);
@@ -108,13 +127,15 @@ export function BatchStudio() {
   // Tóm tắt nguồn prompt hiện tại (hiển thị ngay, không gọi server)
   const sourceSummary = (() => {
     const v = cfg.state.variantsPerPrompt;
-    const fmt = (n: number, what: string) => (v > 1 ? `${fmtNumber(n)} ${what} × ${v} lần → ${fmtNumber(n * v)} video` : `${fmtNumber(n)} ${what} → ${fmtNumber(n)} video`);
+    const fmt = (n: number, what: string) => (isImage ? `${fmtNumber(n)} ${what} × ${v} ảnh → ${fmtNumber(n * v)} ảnh` : v > 1 ? `${fmtNumber(n)} ${what} × ${v} lần → ${fmtNumber(n * v)} video` : `${fmtNumber(n)} ${what} → ${fmtNumber(n)} video`);
     if (setSourceActive && set.data) return { text: fmt(setItemsUsable, onlyApproved ? "prompt đã duyệt" : "prompt"), from: `Bộ prompt “${set.data.name}”` };
     if (tab === "ai") return { text: "Chưa có bộ prompt", from: "Tạo prompt bằng AI" };
     if (tab === "single") return { text: singleText.trim() ? fmt(1, "prompt") : "Chưa nhập prompt", from: "Tạo đơn" };
     const p = curParse.parse;
     return { text: p ? fmt(p.check.uniqueLines.length, "dòng") : "Chưa có prompt", from: tab === "list" ? "Danh sách prompt" : file?.name ?? "Nhập từ file" };
   })();
+
+  const promptCountForImage: number | null = setSourceActive && set.data ? setItemsUsable : tab === "single" ? (singleText.trim() ? 1 : null) : tab === "ai" ? null : (curParse.parse?.check.uniqueLines.length ?? null);
 
   const resolveSource = async (): Promise<Source> => {
     const neg = cfg.model?.negativePrompt && cfg.state.negative.trim() ? cfg.state.negative.trim() : null;
@@ -131,7 +152,7 @@ export function BatchStudio() {
             prompt: i.prompt,
             title: i.title || undefined,
             negative: i.negative,
-            durationSec: useItemOverrides ? i.durationSec : null,
+            durationSec: !isImage && useItemOverrides ? i.durationSec : null,
             aspectRatio: useItemOverrides ? i.aspectRatio : null,
             referenceAssetIds: i.referenceAssetIds.length ? i.referenceAssetIds : undefined,
             promptItemId: i.id,
@@ -152,13 +173,30 @@ export function BatchStudio() {
     if (!parsed.items.length) throw new Error(`Không đọc được prompt nào${parsed.errors[0] ? `: ${parsed.errors[0].message}` : "."}`);
     return {
       mode: tab,
-      prompts: parsed.items.map((it) => withNeg({ prompt: it.draft.prompt, title: it.draft.title, negative: it.draft.negative ?? null, durationSec: it.draft.durationSec ?? null, aspectRatio: it.draft.aspectRatio ?? null })),
+      prompts: parsed.items.map((it) => withNeg({ prompt: it.draft.prompt, title: it.draft.title, negative: it.draft.negative ?? null, durationSec: isImage ? null : (it.draft.durationSec ?? null), aspectRatio: it.draft.aspectRatio ?? null })),
       lines: parsed.items.map((i) => i.line),
       blankLines: parsed.blankLines,
     };
   };
 
   const buildRequest = (src: Source): BatchRequest => {
+    if (isImage) {
+      if (!imageCfg.provider || !imageCfg.config) throw new Error("Chọn provider Muse ở Cấu hình ảnh.");
+      return {
+        kind: "image",
+        name: batchName.trim() || undefined,
+        sessionId,
+        mode: src.mode,
+        promptSetId: src.promptSetId ?? null,
+        providerConfigId: imageCfg.provider.id,
+        modelId: IMAGE_MODEL_ID,
+        config: imageCfg.config,
+        prompts: src.prompts,
+        maxConcurrency: imageCfg.state.maxConcurrency,
+        blankLines: src.blankLines,
+        lines: src.lines,
+      };
+    }
     if (!cfg.provider || !cfg.model || !cfg.config) throw new Error("Chọn provider và model ở Cấu hình video.");
     if (cfg.budgetInvalid) throw new Error("Ngân sách không hợp lệ.");
     return {
@@ -168,7 +206,7 @@ export function BatchStudio() {
       promptSetId: src.promptSetId ?? null,
       providerConfigId: cfg.provider.id,
       modelId: cfg.model.modelId,
-      config: cfg.config,
+      config: cfg.config as BatchRequest["config"],
       prompts: src.prompts,
       maxConcurrency: cfg.state.maxConcurrency,
       budgetLimit: cfg.budgetLimit,
@@ -206,7 +244,7 @@ export function BatchStudio() {
       setSelectedBatchId(r.batch.id);
       setBatchName("");
       emitLocal({ type: "local.batch", batchId: r.batch.id });
-      toast.success(`Đã tạo batch “${r.batch.name}” - chờ duyệt`, r.check.summary);
+      toast.success(`Đã tạo batch ${isImage ? "ảnh " : ""}“${r.batch.name}” - chờ duyệt`, r.check.summary);
       openApproval(r.batch.id, r.estimate);
     } catch (e) {
       if (e instanceof Error && !("code" in e)) setError({ message: e.message });
@@ -232,6 +270,7 @@ export function BatchStudio() {
         sessionId,
         text,
         fileName: tab === "file" ? file?.name : "danh-sach.txt",
+        ...(isImage ? { kind: "image" as const } : {}),
       });
       setActiveSetId(s.id);
       setUseSet(true);
@@ -277,8 +316,8 @@ export function BatchStudio() {
   const [fbPage, setFbPage] = useState("");
   const [shopeeUrl, setShopeeUrl] = useState("");
   const hasPage = Boolean(fbPage) && fbPage !== FB_NONE;
-  const fbReady = fb.isReady(fbPage) && !(hasPage && shopeeError(shopeeUrl));
-  const canAct = Boolean(cfg.provider && cfg.model) && !busy;
+  const fbReady = isImage || (fb.isReady(fbPage) && !(hasPage && shopeeError(shopeeUrl)));
+  const canAct = Boolean(isImage ? imageCfg.provider : cfg.provider && cfg.model) && !busy;
 
   // Bộ prompt vừa sinh đã tải xong → mở triển khai (Mock chạy luôn, provider tính phí vẫn hỏi chi phí)
   useEffect(() => {
@@ -297,6 +336,18 @@ export function BatchStudio() {
               <PenLine size={16} aria-hidden /> Khu vực tạo
             </div>
           </div>
+          <div className="kind-switch">
+            <Segmented
+              ariaLabel="Loại batch"
+              value={kind}
+              onChange={setKind}
+              options={[
+                { id: "video", label: (<><VideoIcon size={14} aria-hidden /> Video</>), title: "Tạo video hàng loạt" },
+                { id: "image", label: (<><ImageIcon size={14} aria-hidden /> Ảnh</>), title: "Tạo ảnh hàng loạt (Muse Image)" },
+              ]}
+            />
+            {isImage ? <span className="muted small">Mỗi prompt × số ảnh/prompt = số ảnh. ~40 giây/ảnh.</span> : null}
+          </div>
           <Tabs
             value={tab}
             onChange={setTab}
@@ -310,13 +361,13 @@ export function BatchStudio() {
           <div className="create-body">
             {tab === "single" ? (
               <Field label="Prompt" hint={cfg.model ? `${singleText.length}/${cfg.model.maxPromptChars} ký tự` : undefined} error={cfg.model && singleText.length > cfg.model.maxPromptChars ? `Vượt giới hạn ${cfg.model.maxPromptChars} ký tự của model` : undefined}>
-                <TextArea rows={6} value={singleText} onChange={(e) => setSingleText(e.target.value)} placeholder="Mô tả video bạn muốn tạo: chủ thể, hành động, bối cảnh, ánh sáng, chuyển động máy..." />
+                <TextArea rows={6} value={singleText} onChange={(e) => setSingleText(e.target.value)} placeholder={isImage ? "Mô tả ảnh bạn muốn tạo: chủ thể, bố cục, góc máy, ánh sáng, chất liệu, phong cách..." : "Mô tả video bạn muốn tạo: chủ thể, hành động, bối cảnh, ánh sáng, chuyển động máy..."} />
               </Field>
             ) : null}
             {tab === "list" ? (
               <>
-                <TextArea className="mono prompt-textarea" rows={12} value={listText} onChange={(e) => setListText(e.target.value)} placeholder={LIST_PLACEHOLDER} spellCheck={false} aria-label="Danh sách prompt, mỗi dòng một prompt" />
-                <LineCounter parse={listParse.parse} loading={listParse.loading} error={listParse.error} variants={cfg.state.variantsPerPrompt} onClean={cleanList} />
+                <TextArea className="mono prompt-textarea" rows={12} value={listText} onChange={(e) => setListText(e.target.value)} placeholder={isImage ? IMAGE_LIST_PLACEHOLDER : LIST_PLACEHOLDER} spellCheck={false} aria-label="Danh sách prompt, mỗi dòng một prompt" />
+                <LineCounter parse={listParse.parse} loading={listParse.loading} error={listParse.error} variants={cfg.state.variantsPerPrompt} onClean={cleanList} unit={unit} />
                 <div className="row-end">
                   <MakeSetButton onClick={() => void makeSet()} busy={busy === "makeSet"} disabled={!listText.trim() || Boolean(busy)} />
                 </div>
@@ -325,7 +376,7 @@ export function BatchStudio() {
             {tab === "file" ? (
               <>
                 <FileImport file={file} onFile={(f) => void onFile(f)} onClear={() => setFile(null)} onEdit={(text) => file && setFile({ ...file, text })} />
-                {file ? <LineCounter parse={fileParse.parse} loading={fileParse.loading} error={fileParse.error} variants={cfg.state.variantsPerPrompt} /> : null}
+                {file ? <LineCounter parse={fileParse.parse} loading={fileParse.loading} error={fileParse.error} variants={cfg.state.variantsPerPrompt} unit={unit} /> : null}
                 {file ? (
                   <div className="row-end">
                     <MakeSetButton onClick={() => void makeSet()} busy={busy === "makeSet"} disabled={!file.text.trim() || Boolean(busy)} />
@@ -333,20 +384,20 @@ export function BatchStudio() {
                 ) : null}
               </>
             ) : null}
-            {tab === "ai" ? <AiGenerateForm cfg={cfg} onGenerated={onGenerated} /> : null}
+            {tab === "ai" ? <AiGenerateForm cfg={cfg} onGenerated={onGenerated} kind={kind} /> : null}
           </div>
           <div className="create-refs">
-            <ReferencePicker cfg={cfg} />
+            {isImage ? <ReferenceGrid max={1} selected={imageCfg.state.referenceAssetIds} onChange={(ids) => imageCfg.set({ referenceAssetIds: ids })} /> : <ReferencePicker cfg={videoCfg} />}
           </div>
         </section>
 
         <aside className="card config-card">
           <div className="card-head">
             <div className="card-title">
-              <SlidersHorizontal size={16} aria-hidden /> Cấu hình video
+              <SlidersHorizontal size={16} aria-hidden /> Cấu hình {unit}
             </div>
           </div>
-          <VideoConfigPanel cfg={cfg} />
+          {isImage ? <ImageConfigPanel img={imageCfg} promptCount={promptCountForImage} /> : <VideoConfigPanel cfg={videoCfg} />}
           <div className="action-block">
             <div className="source-summary">
               <div className="muted tiny">Nguồn: {sourceSummary.from}</div>
@@ -355,18 +406,18 @@ export function BatchStudio() {
             <Field label="Tên batch (tùy chọn)">
               <Input value={batchName} onChange={(e) => setBatchName(e.target.value)} placeholder="vd: Serum - đợt 1" />
             </Field>
-            <FbPageSelect pages={fb.pages} value={fbPage} onChange={(v) => { setFbPage(v); if (!v || v === FB_NONE) setShopeeUrl(""); }} disabled={Boolean(busy)} />
-            {hasPage ? <ShopeeUrlField value={shopeeUrl} onChange={setShopeeUrl} disabled={Boolean(busy)} /> : null}
+            {isImage ? null : <FbPageSelect pages={fb.pages} value={fbPage} onChange={(v) => { setFbPage(v); if (!v || v === FB_NONE) setShopeeUrl(""); }} disabled={Boolean(busy)} />}
+            {!isImage && hasPage ? <ShopeeUrlField value={shopeeUrl} onChange={setShopeeUrl} disabled={Boolean(busy)} /> : null}
             <div className="action-buttons">
               <Button icon={<ShieldCheck size={15} />} loading={busy === "check"} disabled={!canAct} onClick={() => void runEstimate("check")}>
                 Kiểm tra prompt
               </Button>
               <Button icon={<CircleDollarSign size={15} />} loading={busy === "estimate"} disabled={!canAct} onClick={() => void runEstimate("estimate")}>
-                Ước tính chi phí
+                {isImage ? "Ước tính số ảnh" : "Ước tính chi phí"}
               </Button>
             </div>
             <Button variant="primary" size="lg" block icon={<Rocket size={16} />} loading={busy === "create"} disabled={!canAct || !fbReady} title={fbReady ? undefined : "Chọn Page đăng Facebook (hoặc “Không đăng lên Facebook”) và kiểm tra link Shopee trước"} onClick={() => void createBatch()}>
-              Tạo batch
+              {isImage ? "Tạo batch ảnh" : "Tạo batch"}
             </Button>
             <p className="muted tiny">Tạo batch chỉ lưu ở trạng thái “Chờ duyệt” - chưa gọi provider, chưa tốn phí cho tới khi bạn bấm “Duyệt & chạy”.</p>
           </div>
@@ -395,6 +446,7 @@ export function BatchStudio() {
       ) : null}
 
       <PromptSetPanel
+        kind={kind}
         set={set.data}
         loading={set.loading}
         error={set.error && set.error.status !== 404 ? set.error : null}
@@ -410,10 +462,10 @@ export function BatchStudio() {
       />
 
       {deploy && set.data?.id === deploy.setId ? (
-        <DeployDialog set={set.data} cfg={cfg} selection={onlyApproved ? "approved" : "all"} useItemOverrides={useItemOverrides} autoRunFree={deploy.auto} onClose={() => setDeploy(null)} />
+        <DeployDialog kind={kind} set={set.data} cfg={cfg} selection={onlyApproved ? "approved" : "all"} useItemOverrides={useItemOverrides} autoRunFree={deploy.auto} onClose={() => setDeploy(null)} />
       ) : null}
 
-      <BatchesSection />
+      <BatchesSection kind={kind} />
     </div>
   );
 }

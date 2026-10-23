@@ -39,6 +39,8 @@ export interface DeployArgs {
   autoRunIfFree?: boolean;
   /** Đăng lên Page: id Page | "none". Bắt buộc khi tạo thật và đã có >=1 Page (dryRun không ép) */
   fbPage?: string | null;
+  /** "image" = triển khai thành batch ảnh (bộ prompt tạo từ danh sách/file chưa mang dấu kind) */
+  kind?: "video" | "image";
 }
 
 export interface DeployResult {
@@ -151,7 +153,7 @@ export class DeployService {
 
   deploy(workspaceId: string, actor: Actor, promptSetId: string, args: DeployArgs = {}): DeployResult {
     const set = this.prompts.getSet(workspaceId, promptSetId);
-    if (((set.params ?? {}) as { kind?: string }).kind === "image") return this.deployImage(workspaceId, actor, set, args);
+    if (args.kind === "image" || ((set.params ?? {}) as { kind?: string }).kind === "image") return this.deployImage(workspaceId, actor, set, args);
     const selection: DeploySelection = args.selection ?? "auto";
     const items = selectDeployItems(set.items as SetItem[], selection);
     if (!items.length) {
