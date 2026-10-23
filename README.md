@@ -24,7 +24,7 @@ npm start                     # http://127.0.0.1:7878
 npm run dev
 ```
 
-Lần đầu mở trang web → tạo tài khoản quản trị. Mỗi tài khoản có workspace riêng, sẵn một provider **Mock** (miễn phí, ffmpeg dựng video kiểm thử có chữ "MOCK" - không phải video AI).
+Lần đầu mở trang web → tạo tài khoản quản trị. Mỗi tài khoản có workspace riêng. Provider Muse (qua muse2api) phải tự thêm - xem mục dưới; **muốn AI agent cài giúp toàn bộ thì dán prompt trong [`docs/SETUP_PROMPT.md`](docs/SETUP_PROMPT.md).**
 
 Worker chạy chung tiến trình (`WORKER_MODE=inline`). Muốn tách: đặt `WORKER_MODE=off` cho server và chạy `npm run worker` ở tiến trình khác (có thể nhiều worker - lease trong SQLite đảm bảo không nhận trùng job).
 
