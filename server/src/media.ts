@@ -80,6 +80,12 @@ export async function makeThumbnail(tools: MediaTools, input: string, output: st
   await run(tools.ffmpeg, ["-y", "-v", "error", "-ss", t.toFixed(2), "-i", input, "-frames:v", "1", "-vf", "scale='min(480,iw)':-2", "-q:v", "4", output], { timeoutMs: 60_000 });
 }
 
+/** Thumbnail JPEG cho ảnh (cạnh dài tối đa 480px) */
+export async function makeImageThumbnail(tools: MediaTools, input: string, output: string): Promise<void> {
+  fs.mkdirSync(path.dirname(output), { recursive: true });
+  await run(tools.ffmpeg, ["-y", "-v", "error", "-i", input, "-frames:v", "1", "-vf", "scale='if(gt(iw,ih),min(480,iw),-2)':'if(gt(iw,ih),-2,min(480,ih))'", "-q:v", "4", output], { timeoutMs: 60_000 });
+}
+
 /**
  * Trình duyệt không phát được HEVC 10-bit (Seedance 2.5 1080p trả H.265 10-bit).
  * Giữ nguyên file gốc làm tài sản, tạo thêm bản xem H.264 8-bit để phát/so sánh.

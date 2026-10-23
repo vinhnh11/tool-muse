@@ -4,7 +4,7 @@ import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import crypto from "node:crypto";
 import type { Db } from "./db.ts";
-import { makePreview, makeThumbnail, needsPreview, probe, type MediaTools } from "./media.ts";
+import { makeImageThumbnail, makePreview, makeThumbnail, needsPreview, probe, type MediaTools } from "./media.ts";
 import { AppError, newId, nowIso, redact } from "./util.ts";
 import { ProviderError } from "./providers/types.ts";
 
@@ -148,6 +148,8 @@ export class Storage {
     sourceJobId?: string | null;
     sourceAttempt?: number | null;
     folder: string;
+    /** Ảnh: cố tạo thumbnail nhỏ (lỗi thì dùng chính file gốc, không làm hỏng việc lưu) */
+    thumbnail?: boolean;
   }): Promise<AssetRow> {
     const id = newId("ast");
     const name = safeName(args.fileName);
@@ -174,6 +176,21 @@ export class Storage {
         }
       } else {
         thumbRel = relFile;
+        if (args.thumbnail) {
+          try {
+            const tRel = path.join(relDir, "thumb.jpg");
+            await makeImageThumbnail(this.media, absFile, this.abs(tRel));
+            thumbRel = tRel;
+          } catch {
+            thumbRel = relFile;
+          }
+          try {
+            const pi = await probe(this.media, absFile);
+            info = { ...pi, durationSec: null, fps: null, videoCodec: null, hasAudio: false };
+          } catch {
+            /* không đọc được kích thước thì bỏ qua */
+          }
+        }
       }
     } catch (e) {
       fs.rmSync(absDir, { recursive: true, force: true });

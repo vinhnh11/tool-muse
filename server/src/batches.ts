@@ -1,6 +1,6 @@
 import type { AppContext } from "./context.ts";
 import { audit, eventToPublic, recordEvent, type EventRow } from "./events.ts";
-import type { CostEstimate, GenerationInput, GenerationMode, ValidationIssue } from "./providers/types.ts";
+import { IMAGE_ASPECT_RATIOS, IMAGE_CONCURRENCY, IMAGE_CONFIRM_THRESHOLD, IMAGE_MAX_VARIANTS, IMAGE_MODEL_ID, isImageCapable, type CostEstimate, type GenerationInput, type GenerationMode, type ImageGenerationInput, type ValidationIssue } from "./providers/types.ts";
 import { checkList, type ParsedLine, type PromptDraft } from "./prompts.ts";
 import { pageName, resolveFbTarget } from "./fbreels/config.ts";
 import { normalizeShopeeUrl } from "./fbreels/shopee.ts";
@@ -12,6 +12,7 @@ export const ACTIVE_JOB_STATUSES: JobStatus[] = ["submitting", "processing"];
 export const PENDING_JOB_STATUSES: JobStatus[] = ["draft", "awaiting_approval", "queued", "waiting_for_capacity"];
 export const TERMINAL_JOB_STATUSES: JobStatus[] = ["completed", "failed", "cancelled"];
 
+export type BatchKind = "video" | "image";
 export type BatchStatus = "draft" | "awaiting_approval" | "running" | "paused" | "completed" | "cancelled";
 
 export interface BatchConfig {
@@ -27,12 +28,22 @@ export interface BatchConfig {
   maxAttempts: number;
 }
 
+/** Cấu hình batch ẢNH (lưu trong config_json cùng khoá kind:"image") */
+export interface ImageBatchConfig {
+  kind: "image";
+  aspectRatio: string;
+  variantsPerPrompt: number;
+  referenceAssetIds: string[];
+  maxAttempts: number;
+}
+
 export interface Actor {
   userId: string | null;
   kind: "ui" | "api-token" | "mcp" | "chat" | "system";
 }
 
 export interface JobRow {
+  kind: BatchKind;
   id: string;
   batch_id: string;
   workspace_id: string;
@@ -77,6 +88,7 @@ export interface JobRow {
 }
 
 export interface BatchRow {
+  kind: BatchKind;
   id: string;
   workspace_id: string;
   session_id: string | null;
@@ -161,6 +173,33 @@ export function defaultBatchConfig(partial: Partial<BatchConfig> = {}): BatchCon
   };
 }
 
+/** Điền mặc định cho trường thiếu (KHÔNG sửa giá trị sai - giá trị sai bị validateImageConfig báo lỗi) */
+export function defaultImageConfig(partial: Partial<ImageBatchConfig> = {}): ImageBatchConfig {
+  return {
+    kind: "image",
+    aspectRatio: partial.aspectRatio ?? "1:1",
+    variantsPerPrompt: partial.variantsPerPrompt ?? 1,
+    referenceAssetIds: partial.referenceAssetIds ?? [],
+    maxAttempts: Math.max(1, Math.min(6, Math.round(Number(partial.maxAttempts ?? 3)) || 3)),
+  };
+}
+
+/** Kiểm cấu hình ảnh từ API: sai thì báo lỗi tiếng Việt (không âm thầm cắt về giới hạn) */
+export function validateImageConfig(cfg: Partial<ImageBatchConfig> & Record<string, unknown>, maxConcurrency?: number | null): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const ratio = cfg.aspectRatio ?? "1:1";
+  if (!(IMAGE_ASPECT_RATIOS as readonly string[]).includes(String(ratio)))
+    issues.push({ field: "aspectRatio", code: "INVALID_ASPECT", message: `Tỉ lệ khung hình "${ratio}" không hợp lệ - chọn ${IMAGE_ASPECT_RATIOS.join(", ")}.` });
+  const v = cfg.variantsPerPrompt ?? 1;
+  if (!Number.isInteger(Number(v)) || Number(v) < 1 || Number(v) > IMAGE_MAX_VARIANTS)
+    issues.push({ field: "variantsPerPrompt", code: "INVALID_VARIANTS", message: `Số ảnh mỗi prompt phải từ 1 đến ${IMAGE_MAX_VARIANTS}.` });
+  const refs = cfg.referenceAssetIds ?? [];
+  if (!Array.isArray(refs) || refs.length > 1) issues.push({ field: "referenceAssetIds", code: "TOO_MANY_REFERENCES", message: "Tạo ảnh chỉ nhận tối đa 1 ảnh tham chiếu." });
+  if (maxConcurrency !== undefined && maxConcurrency !== null && (!Number.isInteger(Number(maxConcurrency)) || Number(maxConcurrency) < IMAGE_CONCURRENCY.min || Number(maxConcurrency) > IMAGE_CONCURRENCY.max))
+    issues.push({ field: "maxConcurrency", code: "INVALID_CONCURRENCY", message: `Số luồng song song cho ảnh phải từ ${IMAGE_CONCURRENCY.min} đến ${IMAGE_CONCURRENCY.max}.` });
+  return issues;
+}
+
 function round4(n: number): number {
   return Math.round(n * 10000) / 10000;
 }
@@ -200,14 +239,38 @@ export class BatchService {
     };
   }
 
+  /** Input ảnh chuẩn gửi provider (cùng cách đọc asset tham chiếu như video) */
+  buildImageInput(workspaceId: string, cfg: { aspectRatio: string; referenceAssetIds?: string[] }, p: { prompt: string; aspectRatio?: string | null; referenceAssetIds?: string[] }): ImageGenerationInput {
+    const refIds = [...new Set([...(cfg.referenceAssetIds ?? []), ...(p.referenceAssetIds ?? [])])];
+    const referenceImages = refIds.map((id) => {
+      const a = this.ctx.storage.getRow(workspaceId, id);
+      if (a.kind !== "image") throw new AppError("REFERENCE_NOT_IMAGE", `Asset ${id} không phải ảnh - chỉ ảnh mới làm tham chiếu được.`, 400);
+      return { path: this.ctx.storage.abs(a.storage_path), mime: a.mime };
+    });
+    return { modelId: IMAGE_MODEL_ID, prompt: p.prompt.trim(), aspectRatio: p.aspectRatio ?? cfg.aspectRatio, referenceImages };
+  }
+
+  /** Provider (muse2api) có làm được ảnh không - lỗi tiếng Việt nếu không */
+  private imageProvider(workspaceId: string, providerConfigId: string) {
+    const r = this.ctx.providers.resolveById(workspaceId, providerConfigId);
+    if (!isImageCapable(r.adapter)) throw new AppError("IMAGE_PROVIDER_UNSUPPORTED", "Provider này chưa hỗ trợ tạo ảnh - chọn provider Muse (muse2api).", 400);
+    return { ...r, adapter: r.adapter };
+  }
+
   // ---------------------------------------------------------------- kiểm + ước tính
 
-  check(workspaceId: string, args: { providerConfigId: string; modelId: string; config: BatchConfig; prompts: BatchPromptInput[]; blankLines?: number[]; lines?: (number | null)[] }): BatchCheck {
+  check(workspaceId: string, args: { providerConfigId: string; modelId: string; config: BatchConfig | ImageBatchConfig; prompts: BatchPromptInput[]; blankLines?: number[]; lines?: (number | null)[]; kind?: BatchKind }): BatchCheck {
     const { config: provCfg, adapter, row } = this.ctx.providers.resolveById(workspaceId, args.providerConfigId);
+    const isImage = args.kind === "image";
+    const imageAdapter = isImage ? this.imageProvider(workspaceId, args.providerConfigId).adapter : null;
+    const imgCfg = args.config as ImageBatchConfig;
+    const vidCfg = args.config as BatchConfig;
     const batchIssues: ValidationIssue[] = [];
     if (!row.enabled) batchIssues.push({ field: "provider", code: "PROVIDER_DISABLED", message: "Provider đang tắt." });
-    const caps = adapter.getCapabilities(provCfg);
-    if (!caps.models.some((m) => m.modelId === args.modelId)) batchIssues.push({ field: "modelId", code: "MODEL_NOT_AVAILABLE", message: `Model "${args.modelId}" không có trong provider này.` });
+    if (!isImage) {
+      const caps = adapter.getCapabilities(provCfg);
+      if (!caps.models.some((m) => m.modelId === args.modelId)) batchIssues.push({ field: "modelId", code: "MODEL_NOT_AVAILABLE", message: `Model "${args.modelId}" không có trong provider này.` });
+    }
 
     const parsed: ParsedLine[] = args.prompts.map((p, i) => ({ line: args.lines?.[i] ?? i + 1, draft: p }));
     const list = checkList(parsed, args.blankLines ?? []);
@@ -217,7 +280,9 @@ export class BatchService {
       const line = parsed[i]!.line;
       let issues: ValidationIssue[] = [];
       try {
-        issues = adapter.validateInput(this.buildInput(workspaceId, args.modelId, args.config, p), provCfg);
+        issues = imageAdapter
+          ? imageAdapter.validateImageInput(this.buildImageInput(workspaceId, imgCfg, p), provCfg)
+          : adapter.validateInput(this.buildInput(workspaceId, args.modelId, vidCfg, p), provCfg);
       } catch (e) {
         issues = [{ field: "referenceImages", code: (e as AppError).code ?? "INVALID", message: (e as Error).message }];
       }
@@ -233,7 +298,9 @@ export class BatchService {
     const variants = args.config.variantsPerPrompt;
     const valid = items.filter((x) => x.valid).length;
     const jobCount = valid * variants;
-    const summary = variants > 1 ? `${valid} prompt hợp lệ × ${variants} lần tạo → ${jobCount} video` : `${valid} dòng → ${jobCount} video`;
+    const unit = isImage ? "ảnh" : "video";
+    const summary = isImage ? `${valid} prompt × ${variants} ảnh → ${jobCount} ảnh` : variants > 1 ? `${valid} prompt hợp lệ × ${variants} lần tạo → ${jobCount} video` : `${valid} dòng → ${jobCount} video`;
+    void unit;
     return {
       totalLines: list.totalLines,
       blankLines: list.blankLines,
@@ -293,6 +360,32 @@ export class BatchService {
     };
   }
 
+  /** Ước tính batch ảnh: muse2api không tính tiền theo request (tiêu hạn mức nick) → luôn "unknown" */
+  estimateImage(workspaceId: string, args: { providerConfigId: string; imageCount: number; maxConcurrency: number }): BatchEstimate & { imageCount: number; etaMinutes: number } {
+    const { config: provCfg } = this.imageProvider(workspaceId, args.providerConfigId);
+    const providerConcurrency = provCfg.maxConcurrency;
+    const effective = Math.max(1, Math.min(args.maxConcurrency, providerConcurrency));
+    const eta = Math.max(1, Math.ceil((args.imageCount * 40) / effective / 60));
+    const notes = [`~40 giây/ảnh; ${args.imageCount} ảnh với ${effective} luồng ≈ ${eta} phút.`, "Mỗi ảnh tiêu hạn mức tuần của nick Muse, không tính tiền theo request."];
+    if (args.maxConcurrency > providerConcurrency)
+      notes.push(`Bạn chọn ${args.maxConcurrency} luồng nhưng provider chỉ cho ${providerConcurrency} → tăng "Số luồng tối đa" của provider Muse ở trang Provider để đạt ${args.maxConcurrency} ảnh song song.`);
+    return {
+      jobCount: args.imageCount,
+      perJob: Array.from({ length: args.imageCount }, (_, i) => ({ index: i, amount: null, basis: "muse2api tiêu hạn mức nick Muse" })),
+      total: null,
+      currency: "USD",
+      kind: "unknown",
+      basis: "muse2api không tính tiền theo request - mỗi ảnh TIÊU HẠN MỨC tài khoản Muse.",
+      budgetLimit: null,
+      withinBudget: null,
+      effectiveConcurrency: effective,
+      providerConcurrency,
+      notes,
+      imageCount: args.imageCount,
+      etaMinutes: eta,
+    };
+  }
+
   // ---------------------------------------------------------------- tạo / duyệt
 
   createBatch(
@@ -315,8 +408,11 @@ export class BatchService {
       fbPage?: string | null;
       /** Link Shopee của sản phẩm (1 link/batch), chỉ khi đăng lên một Page */
       shopeeUrl?: string | null;
+      /** "image" = batch ảnh (Muse Image); mặc định "video" */
+      kind?: BatchKind;
     },
   ): { batch: BatchRow; check: BatchCheck; estimate: BatchEstimate } {
+    if (args.kind === "image") return this.createImageBatch(workspaceId, actor, args);
     // Luật ép chọn Page nằm ở đây (điểm nghẽn duy nhất của mọi đường tạo batch: API, deploy, tool, MCP, chat)
     const fbTarget = resolveFbTarget(this.ctx, workspaceId, args.fbPage);
     const shopeeUrl = normalizeShopeeUrl(args.shopeeUrl);
@@ -405,11 +501,89 @@ export class BatchService {
     return { batch: this.getBatchRow(workspaceId, batchId), check, estimate };
   }
 
+  /** Tạo batch ẢNH: dùng lại bảng + hàng đợi video, kind='image'. Không đăng Facebook, không Shopee. */
+  private createImageBatch(
+    workspaceId: string,
+    actor: Actor,
+    args: { sessionId?: string | null; name?: string; mode: "single" | "list" | "file" | "ai"; promptSetId?: string | null; providerConfigId: string; config: Partial<BatchConfig> | Partial<ImageBatchConfig>; prompts: BatchPromptInput[]; blankLines?: number[]; lines?: (number | null)[]; maxConcurrency?: number },
+  ): { batch: BatchRow; check: BatchCheck; estimate: BatchEstimate } {
+    const raw = (args.config ?? {}) as Partial<ImageBatchConfig> & Record<string, unknown>;
+    const maxConcurrency = args.maxConcurrency ?? IMAGE_CONCURRENCY.default;
+    const cfgIssues = validateImageConfig(raw, maxConcurrency);
+    if (cfgIssues.length) throw new AppError(cfgIssues[0]!.code, cfgIssues.map((i) => i.message).join(" "), 400, cfgIssues);
+    const config = defaultImageConfig(raw);
+    if (args.sessionId) this.assertSession(workspaceId, args.sessionId);
+    if (!args.prompts.length) throw new AppError("NO_PROMPTS", "Chưa có prompt nào.", 400);
+    if (args.prompts.length * config.variantsPerPrompt > 1000) throw new AppError("BATCH_TOO_LARGE", "Một batch tối đa 1000 ảnh.", 400);
+    this.imageProvider(workspaceId, args.providerConfigId);
+    const prompts = args.prompts.map((p) => ({ ...p, durationSec: null, negative: null }));
+    const check = this.check(workspaceId, { providerConfigId: args.providerConfigId, modelId: IMAGE_MODEL_ID, config, prompts, blankLines: args.blankLines, lines: args.lines, kind: "image" });
+    if (!check.ok) throw new AppError("BATCH_INVALID", "Danh sách prompt/cấu hình chưa hợp lệ - sửa các lỗi trước khi tạo batch (chưa gọi provider).", 422, check);
+    const estimate = this.estimateImage(workspaceId, { providerConfigId: args.providerConfigId, imageCount: prompts.length * config.variantsPerPrompt, maxConcurrency });
+
+    const batchId = newId("bat");
+    const now = nowIso();
+    const name = args.name?.trim() || `Ảnh ${new Date().toLocaleString("vi-VN")}`;
+    this.db.tx(() => {
+      this.db.run(
+        `INSERT INTO video_batches (id, workspace_id, session_id, name, mode, prompt_set_id, provider_config_id, model_id, config_json, max_concurrency, status,
+           budget_limit, estimate_json, estimated_cost, actual_cost, currency, created_by, fb_page_id, shopee_url, kind, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_approval', NULL, ?, NULL, NULL, ?, ?, NULL, NULL, 'image', ?, ?)`,
+        batchId,
+        workspaceId,
+        args.sessionId ?? null,
+        name,
+        args.mode,
+        args.promptSetId ?? null,
+        args.providerConfigId,
+        IMAGE_MODEL_ID,
+        JSON.stringify(config),
+        maxConcurrency,
+        JSON.stringify({ ...estimate, perJob: undefined }),
+        estimate.currency,
+        actor.userId,
+        now,
+        now,
+      );
+      let seq = 0;
+      prompts.forEach((p) => {
+        for (let v = 0; v < config.variantsPerPrompt; v++) {
+          const jobId = newId("job");
+          seq++;
+          this.db.run(
+            `INSERT INTO video_batch_jobs (id, batch_id, workspace_id, session_id, seq, prompt_item_id, title, prompt, negative, reference_asset_ids_json,
+               provider_config_id, model_id, config_json, status, max_attempts, estimated_cost, lineage_id, version, kind, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 'awaiting_approval', ?, NULL, ?, 1, 'image', ?, ?)`,
+            jobId,
+            batchId,
+            workspaceId,
+            args.sessionId ?? null,
+            seq,
+            p.promptItemId ?? null,
+            (p.title ?? "").slice(0, 200) + (config.variantsPerPrompt > 1 ? ` (#${v + 1})` : ""),
+            p.prompt.trim(),
+            JSON.stringify(p.referenceAssetIds ?? []),
+            args.providerConfigId,
+            IMAGE_MODEL_ID,
+            JSON.stringify({ ...config, aspectRatio: p.aspectRatio ?? config.aspectRatio }),
+            config.maxAttempts,
+            jobId,
+            now,
+            now,
+          );
+        }
+      });
+      recordEvent(this.db, { workspaceId, type: "batch.created", batchId, to: "awaiting_approval", message: `${seq} ảnh chờ duyệt`, data: { jobCount: seq, kind: "image" } });
+      audit(this.db, { workspaceId, userId: actor.userId, actor: actor.kind, action: "batch.create", targetType: "batch", targetId: batchId, data: { jobCount: seq, kind: "image", provider: args.providerConfigId } });
+    });
+    return { batch: this.getBatchRow(workspaceId, batchId), check, estimate };
+  }
+
   /**
    * Duyệt + chạy batch. Bắt buộc confirm=true. Chi phí xác định → approvedMaxCost
    * phải ≥ ước tính hiện tại. Chi phí không xác định → acknowledgeUnknownCost.
    */
-  approveBatch(workspaceId: string, actor: Actor, batchId: string, opts: { confirm: boolean; approvedMaxCost?: number | null; acknowledgeUnknownCost?: boolean }): BatchRow {
+  approveBatch(workspaceId: string, actor: Actor, batchId: string, opts: { confirm: boolean; approvedMaxCost?: number | null; acknowledgeUnknownCost?: boolean; confirmLarge?: boolean }): BatchRow {
     const b = this.getBatchRow(workspaceId, batchId);
     if (b.status !== "awaiting_approval") throw new AppError("BATCH_NOT_AWAITING_APPROVAL", `Batch đang ở trạng thái "${b.status}", không cần duyệt.`, 409);
     if (opts.confirm !== true) throw new AppError("CONFIRMATION_REQUIRED", "Cần xác nhận rõ ràng (confirm=true) trước khi chạy batch.", 409);
@@ -418,6 +592,8 @@ export class BatchService {
       this.refreshBatch(batchId);
       throw new AppError("NOTHING_TO_APPROVE", "Batch không còn job nào chờ duyệt (đã hủy hết).", 409);
     }
+    if (b.kind === "image" && waiting >= IMAGE_CONFIRM_THRESHOLD && opts.confirmLarge !== true)
+      throw new AppError("LARGE_BATCH_CONFIRM_REQUIRED", `Batch này sẽ tạo ${waiting} ảnh (từ ${IMAGE_CONFIRM_THRESHOLD} ảnh trở lên cần xác nhận riêng, mỗi ảnh tiêu hạn mức nick Muse) - gửi confirmLarge=true để chạy.`, 409, { imageCount: waiting, threshold: IMAGE_CONFIRM_THRESHOLD });
     const est = this.reestimate(b);
     if (b.budget_limit !== null) {
       if (est.total === null && !opts.acknowledgeUnknownCost)
@@ -451,6 +627,10 @@ export class BatchService {
 
   /** Ước tính lại cho các job đang chờ duyệt của batch (giá có thể đã đổi) */
   reestimate(b: BatchRow, onlyJobIds?: string[]): BatchEstimate {
+    if (b.kind === "image") {
+      const n = this.db.all<JobRow>("SELECT * FROM video_batch_jobs WHERE batch_id = ? AND status = 'awaiting_approval'", b.id).filter((j) => !onlyJobIds || onlyJobIds.includes(j.id)).length;
+      return this.estimateImage(b.workspace_id, { providerConfigId: b.provider_config_id, imageCount: n, maxConcurrency: b.max_concurrency });
+    }
     const jobs = this.db
       .all<JobRow>("SELECT * FROM video_batch_jobs WHERE batch_id = ? AND status = 'awaiting_approval' ORDER BY seq", b.id)
       .filter((j) => !onlyJobIds || onlyJobIds.includes(j.id));
@@ -470,8 +650,8 @@ export class BatchService {
 
   setMaxConcurrency(workspaceId: string, actor: Actor, batchId: string, n: number): BatchRow {
     const b = this.getBatchRow(workspaceId, batchId);
-    const v = Math.max(1, Math.min(64, Math.round(Number(n))));
-    if (!Number.isFinite(v)) throw new AppError("INVALID_CONCURRENCY", "Số luồng không hợp lệ.", 400);
+    if (!Number.isFinite(Number(n))) throw new AppError("INVALID_CONCURRENCY", "Số luồng không hợp lệ.", 400);
+    const v = Math.max(1, Math.min(b.kind === "image" ? IMAGE_CONCURRENCY.max : 64, Math.round(Number(n))));
     this.db.run("UPDATE video_batches SET max_concurrency = ?, updated_at = ? WHERE id = ? AND workspace_id = ?", v, nowIso(), batchId, workspaceId);
     audit(this.ctx.db, { workspaceId, userId: actor.userId, actor: actor.kind, action: "batch.concurrency", targetType: "batch", targetId: batchId, data: { from: b.max_concurrency, to: v } });
     return this.getBatchRow(workspaceId, batchId);
@@ -610,6 +790,10 @@ export class BatchService {
     for (const j of target) {
       const { config, adapter } = this.ctx.providers.resolveById(workspaceId, j.provider_config_id);
       const jc = safeJsonParse<BatchConfig>(j.config_json, defaultBatchConfig());
+      if (j.kind === "image") {
+        total = null; // ảnh: tiêu hạn mức Muse, không có đơn giá
+        continue;
+      }
       const est = adapter.estimateCost(this.buildInput(workspaceId, j.model_id, jc, { prompt: j.prompt, negative: j.negative, referenceAssetIds: safeJsonParse(j.reference_asset_ids_json, []) }), config);
       total = est.amount === null || total === null ? null : round4(total + est.amount);
     }
@@ -661,10 +845,19 @@ export class BatchService {
     const negative = args.negative === undefined ? src.negative : args.negative;
     const refs = safeJsonParse<string[]>(src.reference_asset_ids_json, []);
     const { config, adapter } = this.ctx.providers.resolveById(workspaceId, src.provider_config_id);
-    const input = this.buildInput(workspaceId, src.model_id, newCfg, { prompt, negative, referenceAssetIds: refs });
-    const issues = adapter.validateInput(input, config);
-    if (issues.length) throw new AppError("INPUT_INVALID", issues.map((i) => i.message).join(" "), 422, issues);
-    const est = adapter.estimateCost(input, config);
+    let est: CostEstimate;
+    if (src.kind === "image") {
+      // ảnh: chỉ đổi prompt/tỷ lệ
+      const imgAdapter = this.imageProvider(workspaceId, src.provider_config_id).adapter;
+      const issues = imgAdapter.validateImageInput(this.buildImageInput(workspaceId, newCfg, { prompt, referenceAssetIds: refs }), config);
+      if (issues.length) throw new AppError("INPUT_INVALID", issues.map((i) => i.message).join(" "), 422, issues);
+      est = { amount: null, currency: "USD", basis: "muse2api tiêu hạn mức nick Muse", kind: "unknown" };
+    } else {
+      const input = this.buildInput(workspaceId, src.model_id, newCfg, { prompt, negative, referenceAssetIds: refs });
+      const issues = adapter.validateInput(input, config);
+      if (issues.length) throw new AppError("INPUT_INVALID", issues.map((i) => i.message).join(" "), 422, issues);
+      est = adapter.estimateCost(input, config);
+    }
     let startNow = false;
     if (args.confirm) {
       if (est.amount === null && !args.acknowledgeUnknownCost) throw new AppError("COST_UNKNOWN_ACK_REQUIRED", "Không ước tính được chi phí - cần xác nhận chấp nhận chi phí không xác định.", 409);
@@ -679,8 +872,8 @@ export class BatchService {
       const maxSeq = Number(this.db.get<{ s: number }>("SELECT MAX(seq) AS s FROM video_batch_jobs WHERE batch_id = ?", src.batch_id)?.s ?? 0);
       this.db.run(
         `INSERT INTO video_batch_jobs (id, batch_id, workspace_id, session_id, seq, prompt_item_id, title, prompt, negative, reference_asset_ids_json,
-           provider_config_id, model_id, config_json, status, max_attempts, estimated_cost, lineage_id, version, parent_job_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           provider_config_id, model_id, config_json, status, max_attempts, estimated_cost, lineage_id, version, parent_job_id, created_at, updated_at, kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id,
         src.batch_id,
         workspaceId,
@@ -702,6 +895,7 @@ export class BatchService {
         src.id,
         now,
         now,
+        src.kind,
       );
       if (startNow) this.db.run("UPDATE video_batches SET status = CASE WHEN status IN ('completed','cancelled') THEN 'running' ELSE status END, updated_at = ? WHERE id = ?", now, src.batch_id);
       recordEvent(this.db, { workspaceId, type: "job.created", batchId: src.batch_id, jobId: id, to: startNow ? "queued" : "awaiting_approval", message: `Phiên bản V${maxV + 1} từ ${src.id}` });
@@ -817,6 +1011,7 @@ export class BatchService {
     const provider = this.ctx.providers.rowById(b.provider_config_id);
     return {
       id: b.id,
+      kind: b.kind ?? "video",
       sessionId: b.session_id,
       name: b.name,
       mode: b.mode,
@@ -850,6 +1045,7 @@ export class BatchService {
     const provider = this.ctx.providers.rowById(j.provider_config_id);
     return {
       id: j.id,
+      kind: j.kind ?? "video",
       batchId: j.batch_id,
       sessionId: j.session_id,
       seq: j.seq,
@@ -885,16 +1081,30 @@ export class BatchService {
     };
   }
 
-  listBatches(workspaceId: string, opts: { sessionId?: string | null; limit?: number } = {}) {
-    const rows = opts.sessionId
-      ? this.db.all<BatchRow>("SELECT * FROM video_batches WHERE workspace_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT ?", workspaceId, opts.sessionId, opts.limit ?? 100)
-      : this.db.all<BatchRow>("SELECT * FROM video_batches WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?", workspaceId, opts.limit ?? 100);
+  /** kind: mặc định "video" (giữ hành vi cũ cho client/MCP cũ); "image" | "all" để lấy loại khác */
+  listBatches(workspaceId: string, opts: { sessionId?: string | null; limit?: number; kind?: BatchKind | "all" } = {}) {
+    const kind = opts.kind ?? "video";
+    const where = ["workspace_id = ?"];
+    const params: (string | number)[] = [workspaceId];
+    if (opts.sessionId) {
+      where.push("session_id = ?");
+      params.push(opts.sessionId);
+    }
+    if (kind !== "all") {
+      where.push("kind = ?");
+      params.push(kind);
+    }
+    const rows = this.db.all<BatchRow>(`SELECT * FROM video_batches WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT ?`, ...params, opts.limit ?? 100);
     return rows.map((b) => this.batchToPublic(b));
   }
 
-  listJobs(workspaceId: string, f: { batchId?: string; sessionId?: string; statuses?: string[]; q?: string; limit?: number; offset?: number }) {
+  listJobs(workspaceId: string, f: { batchId?: string; sessionId?: string; statuses?: string[]; q?: string; limit?: number; offset?: number; kind?: BatchKind | "all" }) {
     const where = ["workspace_id = ?"];
     const params: (string | number)[] = [workspaceId];
+    if (f.kind === "video" || f.kind === "image") {
+      where.push("kind = ?");
+      params.push(f.kind);
+    }
     if (f.batchId) {
       where.push("batch_id = ?");
       params.push(f.batchId);

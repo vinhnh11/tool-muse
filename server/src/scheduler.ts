@@ -4,7 +4,7 @@ import os from "node:os";
 import type { AppContext } from "./context.ts";
 import { BatchService, defaultBatchConfig, type BatchConfig, type BatchRow, type JobRow } from "./batches.ts";
 import { recordEvent } from "./events.ts";
-import { ERROR_MESSAGES, ProviderError, type ErrorCategory, type ProviderCallContext, type ResolvedProviderConfig, type VideoProvider } from "./providers/types.ts";
+import { ERROR_MESSAGES, ProviderError, isImageCapable, type ErrorCategory, type ProviderCallContext, type ProviderCapabilities, type ResolvedProviderConfig, type VideoProvider } from "./providers/types.ts";
 import type { ProviderConfigRow } from "./providers/registry.ts";
 import { newId, nowIso, redact, safeJsonParse } from "./util.ts";
 import { enqueueReel } from "./fbreels/queue.ts";
@@ -118,6 +118,12 @@ export class Scheduler {
     return { config: this.ctx.providers.resolve(row), adapter: this.ctx.providers.adapter(row.provider_type) };
   }
 
+  /** Gửi lại cùng key có an toàn không: video theo caps.idempotency, ảnh theo adapter.imageIdempotency */
+  private idempotentFor(kind: string, adapter: VideoProvider, caps: ProviderCapabilities): boolean {
+    if (kind === "image") return isImageCapable(adapter) ? adapter.imageIdempotency : false;
+    return caps.idempotency;
+  }
+
   backoffMs(attempt: number, retryAfterSec: number | null): number {
     const exp = Math.min(this.opts.backoffMaxMs, this.opts.backoffBaseMs * 2 ** Math.max(0, attempt - 1));
     const jitter = exp * (0.8 + Math.random() * 0.4);
@@ -176,8 +182,9 @@ export class Scheduler {
         }
         // submitting: worker chết giữa lúc gửi → không biết provider đã nhận chưa
         const row = this.ctx.providers.rowById(fresh.provider_config_id);
-        const caps = row ? this.ctx.providers.adapter(row.provider_type).getCapabilities(null) : null;
-        if (caps?.idempotency) {
+        const adapterR = row ? this.ctx.providers.adapter(row.provider_type) : null;
+        const caps = adapterR ? adapterR.getCapabilities(null) : null;
+        if (adapterR && caps && this.idempotentFor(fresh.kind, adapterR, caps)) {
           db.run(
             "UPDATE video_batch_jobs SET status = 'queued', resubmit_same_key = 1, lease_owner = NULL, lease_until = NULL, next_attempt_at = 0, updated_at = ? WHERE id = ?",
             nowIso(),
@@ -282,10 +289,18 @@ export class Scheduler {
     const pctx = this.providerCtx(config, job);
     let remoteJobId: string;
     try {
-      const input = this.svc.buildInput(job.workspace_id, job.model_id, cfg, { prompt: job.prompt, negative: job.negative, referenceAssetIds: safeJsonParse(job.reference_asset_ids_json, []) });
-      const issues = adapter.validateInput(input, config);
-      if (issues.length) throw new ProviderError("INVALID_INPUT", issues.map((i) => i.message).join(" "), { provenNotSubmitted: true, transient: false });
-      ({ remoteJobId } = await adapter.submitGeneration(input, pctx));
+      if (job.kind === "image") {
+        if (!isImageCapable(adapter)) throw new ProviderError("INVALID_INPUT", "Provider này chưa hỗ trợ tạo ảnh.", { provenNotSubmitted: true, transient: false });
+        const input = this.svc.buildImageInput(job.workspace_id, cfg, { prompt: job.prompt, aspectRatio: cfg.aspectRatio, referenceAssetIds: safeJsonParse(job.reference_asset_ids_json, []) });
+        const issues = adapter.validateImageInput(input, config);
+        if (issues.length) throw new ProviderError("INVALID_INPUT", issues.map((i) => i.message).join(" "), { provenNotSubmitted: true, transient: false });
+        ({ remoteJobId } = await adapter.submitImage(input, pctx));
+      } else {
+        const input = this.svc.buildInput(job.workspace_id, job.model_id, cfg, { prompt: job.prompt, negative: job.negative, referenceAssetIds: safeJsonParse(job.reference_asset_ids_json, []) });
+        const issues = adapter.validateInput(input, config);
+        if (issues.length) throw new ProviderError("INVALID_INPUT", issues.map((i) => i.message).join(" "), { provenNotSubmitted: true, transient: false });
+        ({ remoteJobId } = await adapter.submitGeneration(input, pctx));
+      }
     } catch (e) {
       this.handleSubmitError(job, adapter, config, e);
       return;
@@ -327,7 +342,7 @@ export class Scheduler {
       return;
     }
     // Không chứng minh được provider chưa nhận
-    if (caps.idempotency && job.transient_failures < 5) {
+    if (this.idempotentFor(job.kind, adapter, caps) && job.transient_failures < 5) {
       const delay = this.backoffMs(job.transient_failures + 1, pe.retryAfterSec);
       this.svc.transition(
         job,
@@ -403,9 +418,18 @@ export class Scheduler {
   private async poll(job: JobRow, provRow: ProviderConfigRow): Promise<void> {
     const { config, adapter } = this.resolveProvider(provRow);
     const interval = this.pollInterval(config);
+    // Ảnh chờ quá lâu (mặc định 900s kể từ lúc gửi) → coi là timeout, tạo lại nếu còn lượt
+    if (job.kind === "image" && job.submitted_at) {
+      const maxWaitSec = Number(config.options?.imageMaxWaitSec);
+      const limitMs = (Number.isFinite(maxWaitSec) && maxWaitSec > 0 ? maxWaitSec : 900) * 1000;
+      if (Date.now() - Date.parse(job.submitted_at) > limitMs) {
+        this.failOrRetry(job, { category: "TIMEOUT", message: `Ảnh chờ quá ${Math.round(limitMs / 1000)} giây chưa xong`, transient: true }, null);
+        return;
+      }
+    }
     let st;
     try {
-      st = await adapter.getGenerationStatus(job.remote_job_id!, this.providerCtx(config, job));
+      st = job.kind === "image" && isImageCapable(adapter) ? await adapter.getImageStatus(job.remote_job_id!, this.providerCtx(config, job)) : await adapter.getGenerationStatus(job.remote_job_id!, this.providerCtx(config, job));
     } catch (e) {
       const failures = job.poll_failures + 1;
       const msg = redact((e as Error).message, [config.apiKey]);
@@ -427,32 +451,38 @@ export class Scheduler {
       return;
     }
     if (st.status === "failed") {
-      const err = st.error ?? { category: "GENERATION_FAILED" as ErrorCategory, message: "Tạo video thất bại.", transient: false };
+      const err = st.error ?? { category: "GENERATION_FAILED" as ErrorCategory, message: job.kind === "image" ? "Tạo ảnh thất bại." : "Tạo video thất bại.", transient: false };
       const actual = adapter.actualCost?.(st.usage ?? null, { modelId: job.model_id } as never, config) ?? null;
-      if (err.transient && job.attempt < job.max_attempts) {
-        const delay = this.backoffMs(job.attempt, null);
-        this.svc.transition(
-          job,
-          "queued",
-          { remote_job_id: null, next_attempt_at: Date.now() + delay, error_code: err.category, error_message: `${err.message} - lỗi tạm thời, tạo lại sau ${Math.round(delay / 1000)}s (lần ${job.attempt}/${job.max_attempts}).`, error_detail: err.providerCode ?? null, actual_cost: actual, progress: null },
-          ["processing"],
-        );
-        return;
-      }
-      this.svc.transition(job, "failed", { error_code: err.category, error_message: `${ERROR_MESSAGES[err.category] ?? ""} ${err.message}`.trim(), error_detail: err.providerCode ?? null, actual_cost: actual }, ["processing"]);
+      this.failOrRetry(job, err, actual);
       return;
     }
     // completed → tải về kho bền
     await this.finalize(job, adapter, config, st.usage ?? null, interval);
   }
 
+  /** Provider báo failed: lỗi tạm thời còn lượt → xếp lại hàng đợi (tạo task mới), không thì failed */
+  private failOrRetry(job: JobRow, err: { category: ErrorCategory; message: string; providerCode?: string | null; transient?: boolean }, actual: number | null): void {
+    if (err.transient && job.attempt < job.max_attempts) {
+      const delay = this.backoffMs(job.attempt, null);
+      this.svc.transition(
+        job,
+        "queued",
+        { remote_job_id: null, next_attempt_at: Date.now() + delay, error_code: err.category, error_message: `${err.message} - lỗi tạm thời, tạo lại sau ${Math.round(delay / 1000)}s (lần ${job.attempt}/${job.max_attempts}).`, error_detail: err.providerCode ?? null, actual_cost: actual, progress: null },
+        ["processing"],
+      );
+      return;
+    }
+    this.svc.transition(job, "failed", { error_code: err.category, error_message: `${ERROR_MESSAGES[err.category] ?? ""} ${err.message}`.trim(), error_detail: err.providerCode ?? null, actual_cost: actual }, ["processing"]);
+  }
+
   private async finalize(job: JobRow, adapter: VideoProvider, config: ResolvedProviderConfig, usage: { tokens?: number | null; durationSec?: number | null } | null, interval: number): Promise<void> {
     const db = this.ctx.db;
     let asset = this.ctx.storage.existingForJob(job.id, job.attempt);
     if (!asset) {
-      const tmp = path.join(this.ctx.storage.tmpDir("downloads"), `${job.id}-${job.attempt}-${Date.now()}.mp4`);
+      const isImage = job.kind === "image";
+      const tmp = path.join(this.ctx.storage.tmpDir("downloads"), `${job.id}-${job.attempt}-${Date.now()}.${isImage ? "webp" : "mp4"}`);
       try {
-        const res = await adapter.retrieveResult(job.remote_job_id!, this.providerCtx(config, job));
+        const res = isImage && isImageCapable(adapter) ? await adapter.retrieveImage(job.remote_job_id!, this.providerCtx(config, job)) : await adapter.retrieveResult(job.remote_job_id!, this.providerCtx(config, job));
         if (res.filePath) fs.copyFileSync(res.filePath, tmp);
         else if (res.url) await this.ctx.storage.downloadToTmp(res.url, tmp, this.ctx.fetchImpl);
         else throw new ProviderError("INVALID_RESULT", "Provider không trả file/URL kết quả.");
@@ -461,9 +491,10 @@ export class Scheduler {
           workspaceId: job.workspace_id,
           sessionId: job.session_id,
           tmpPath: tmp,
-          fileName: `${(b?.name ?? "batch").replace(/[^\p{L}\p{N}]+/gu, "-").slice(0, 40)}-${String(job.seq).padStart(3, "0")}-v${job.version}.mp4`,
-          kind: "generated",
+          fileName: `${(b?.name ?? "batch").replace(/[^\p{L}\p{N}]+/gu, "-").slice(0, 40)}-${String(job.seq).padStart(3, "0")}-v${job.version}.${isImage ? (res.mime === "image/png" ? "png" : res.mime === "image/jpeg" ? "jpg" : "webp") : "mp4"}`,
+          kind: isImage ? "image" : "generated",
           origin: "provider",
+          thumbnail: isImage,
           createdBy: b?.created_by ?? null,
           sourceJobId: job.id,
           sourceAttempt: job.attempt,
@@ -501,6 +532,7 @@ export class Scheduler {
         this.svc.refreshBatch(job.batch_id);
       }
     });
+    if (job.kind === "image") return; // ảnh không bao giờ vào hàng đăng Reels
     try {
       enqueueReel(this.ctx, asset!.id);
     } catch (e) {
