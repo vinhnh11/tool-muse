@@ -69,6 +69,8 @@ Luật chi phí: `video_create_batch` chỉ tạo batch chờ duyệt. Chat tron
 
 Kết nối Hermes qua MCP: xem `docs/HERMES.md`.
 
+**Tạo ảnh hàng loạt** (Muse Image qua muse2api): chọn `Ảnh` ở công tắc Video | Ảnh của Batch Studio - nhập prompt bằng 4 cách như video, duyệt, chạy; ảnh vào Thư viện (lọc Video | Ảnh), tải từng ảnh hoặc ZIP cả batch. Hướng dẫn: `docs/image-batch.md`.
+
 Skill cho chat (thư mục `skills/<id>/SKILL.md`): quảng cáo sản phẩm, người nói review, cinematic thương hiệu, motion graphics. Chế độ Tự động (AI chọn skill/provider trong số đã bật) hoặc Thủ công (dùng đúng skill/provider/model người dùng chọn).
 
 ## Kiểm thử
@@ -99,5 +101,6 @@ server/src/
   auth.ts, secrets.ts         tài khoản, phiên, API token, mã hóa secret
 web/                          React + Vite
 docs/API.md                   hợp đồng API
+docs/image-batch.md           hướng dẫn tạo ảnh hàng loạt
 skills/                       skill cho chat
 ```

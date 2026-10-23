@@ -36,6 +36,13 @@ Biến tùy chọn: `BVS_WORKSPACE` (chọn workspace), `BVS_EXPORT_DIR` (nơi `
 
 Agent sẽ: `video_list_assets` → `video_generate_prompts` → `video_estimate_batch` → `video_create_batch` (chờ duyệt) → dừng và báo chi phí. Duyệt chạy bằng giao diện, hoặc agent gọi `video_approve_batch` với `confirm:true` + `approvedMaxCost` đúng bằng ước tính, chỉ khi người dùng đã đồng ý rõ ràng.
 
+## Làm ảnh hàng loạt
+
+- "Làm 20 ảnh sản phẩm tỉ lệ 4:5, mỗi prompt 2 ảnh." → tool `video_create_image_batch` (`prompts` hoặc `promptSetId`, `aspectRatio`, `variantsPerPrompt` 1-4, `referenceAssetId` tuỳ chọn, `maxConcurrency` 1-6, mặc định 3). Prompt do AI viết cho ảnh: `video_generate_prompts` với `kind:"image"` (REST `POST /api/prompt-sets/generate`).
+- Tool chỉ tạo batch **chờ duyệt**. Agent PHẢI báo số ảnh (prompt × số ảnh/prompt), thời gian ước tính (~40 giây/ảnh, chia cho số luồng) và nhắc mỗi ảnh tiêu hạn mức tuần của nick Muse, rồi **hỏi người dùng** trước khi gọi `video_approve_batch` (`confirm:true`, `acknowledgeUnknownCost:true`; từ 30 ảnh trở lên thêm `confirmLarge:true`). Không tự duyệt.
+- Theo dõi/huỷ/tạo lại dùng nguyên `video_get_batch_status`, `video_cancel_job`, `video_retry_job`. Tải ảnh: `GET /api/batches/:id/zip` hoặc `video_list_assets` (`kind:"image"`). Ảnh KHÔNG được đăng Facebook.
+- Để đạt 3 ảnh song song, "Số luồng tối đa" của provider Muse (trang Provider) phải ≥ 3.
+
 ## CLI (không cần MCP)
 
 ```bash
